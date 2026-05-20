@@ -19,10 +19,14 @@ Designed for modern Minecraft versions and high-population servers, it features 
 
 ## 🛠️ Installation
 
-1.  Download the latest `.jar` from the [Releases](https://github.com/fleoxzyy/FP-s-AntiFreecam/releases) page.
+1.  Download the latest `.jar` from [Modrinth](https://modrinth.com/plugin/fp-antifreecam).
 2.  Place the jar in your server's `plugins/` folder.
 3.  Restart your server.
 4.  Configure your protected worlds in `plugins/FPAntiFreeCam/config.yml`.
+
+## 💬 Support
+
+Need help? Join our [Discord Server](https://discord.gg/drcf6arhmy) for support and updates!
 
 ## ⚙️ Configuration
 
