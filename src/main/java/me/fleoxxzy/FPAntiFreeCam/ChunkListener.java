@@ -121,8 +121,8 @@ public final class ChunkListener implements PacketListener {
                 for (int lx = 0; lx < 16; lx++) {
                     for (int lz = 0; lz < 16; lz++) {
                         try {
-                            // Optimization: use integer ID comparison (much faster than .equals())
-                            if (section.getFlatBlock(lx, ly, lz) != replacementId) {
+                            WrappedBlockState current = section.get(lx, ly, lz);
+                            if (current != null && current.getGlobalId() != replacementId) {
                                 section.set(lx, ly, lz, replacement);
                                 replacedCount++;
                                 modified = true;
