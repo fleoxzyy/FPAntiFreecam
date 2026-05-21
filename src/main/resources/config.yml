@@ -40,6 +40,15 @@ protection:
   # Smooth transition zone (blocks above void-y where the fade starts).
   transition-zone: 5
 
+  # Raycast-based activation (look-up-from-cave check).
+  # Prevents FreeCam from being used in caves with sky access.
+  raycast:
+    enabled: true
+    # Distance below surface-y where raycasting is active.
+    zone: 8.0
+    # Minimum upward angle (0.0 to 1.0) to trigger protection.
+    min-upward-angle: 0.15
+
 # ── Replacement block ─────────────────────────────────────────
 # Block type sent to the client in place of hidden underground blocks.
 # "air" produces a clean void look (recommended).

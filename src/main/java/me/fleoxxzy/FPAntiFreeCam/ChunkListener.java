@@ -70,6 +70,7 @@ public final class ChunkListener implements PacketListener {
     // ── CHUNK_DATA ────────────────────────────────────────────────────────
 
     private void handleChunkData(PacketSendEvent event, Player player) {
+        plugin.incrementPacketsProcessed();
         WrappedBlockState replacement = plugin.getReplacementBlock();
         if (replacement == null) return;
 
@@ -93,10 +94,16 @@ public final class ChunkListener implements PacketListener {
 
         if (sections == null) return;
 
-        World   world    = player.getWorld();
-        int     minY     = world.getMinHeight();
-        int     voidY    = plugin.getVoidY();
-        boolean modified = false;
+        World   world         = player.getWorld();
+        int     minY          = world.getMinHeight();
+        int     voidY         = plugin.getVoidY();
+        int     replacementId = plugin.getReplacementBlockId();
+
+        // Early-out: if world minY is already above voidY, no blocks in this world can be hidden.
+        if (minY > voidY) return;
+
+        boolean modified      = false;
+        long    replacedCount = 0;
 
         for (int si = 0; si < sections.length; si++) {
             BaseChunk section = sections[si];
@@ -104,16 +111,20 @@ public final class ChunkListener implements PacketListener {
 
             int sectionBaseY = minY + si * 16;
 
+            // Optimization: skip the whole section if its bottom is already above voidY.
+            if (sectionBaseY > voidY) continue;
+
             for (int ly = 0; ly < 16; ly++) {
                 int worldY = sectionBaseY + ly;
-                if (worldY > voidY) continue;
+                if (worldY > voidY) break; // Optimization: skip remaining layers in this section
 
                 for (int lx = 0; lx < 16; lx++) {
                     for (int lz = 0; lz < 16; lz++) {
                         try {
-                            WrappedBlockState current = section.get(lx, ly, lz);
-                            if (current != null && !current.equals(replacement)) {
+                            // Optimization: use integer ID comparison (much faster than .equals())
+                            if (section.getFlatBlock(lx, ly, lz) != replacementId) {
                                 section.set(lx, ly, lz, replacement);
+                                replacedCount++;
                                 modified = true;
                             }
                         } catch (Exception ignored) {}
@@ -125,13 +136,16 @@ public final class ChunkListener implements PacketListener {
         if (modified) {
             try { wrapper.setIgnoreOldData(true); } catch (Exception ignored) {}
             event.markForReEncode(true);
-            plugin.dbg("CHUNK_DATA modified for " + player.getName());
+            plugin.incrementChunksModified();
+            plugin.addBlocksReplaced(replacedCount);
+            plugin.dbg("CHUNK_DATA modified for " + player.getName() + " (" + replacedCount + " blocks)");
         }
     }
 
     // ── BLOCK_CHANGE ──────────────────────────────────────────────────────
 
     private void handleBlockChange(PacketSendEvent event, Player player) {
+        plugin.incrementPacketsProcessed();
         WrappedBlockState replacement = plugin.getReplacementBlock();
         if (replacement == null) return;
 
@@ -142,10 +156,11 @@ public final class ChunkListener implements PacketListener {
 
             if (pos.getY() > plugin.getVoidY()) return;
 
-            WrappedBlockState current = wrapper.getBlockState();
-            if (current != null && !current.equals(replacement)) {
+            int replacementId = plugin.getReplacementBlockId();
+            if (wrapper.getBlockState().getGlobalId() != replacementId) {
                 wrapper.setBlockState(replacement);
                 event.markForReEncode(true);
+                plugin.addBlocksReplaced(1);
                 plugin.dbg("BLOCK_CHANGE modified at " + pos + " for " + player.getName());
             }
         } catch (Exception e) {
@@ -156,6 +171,7 @@ public final class ChunkListener implements PacketListener {
     // ── MULTI_BLOCK_CHANGE ────────────────────────────────────────────────
 
     private void handleMultiBlockChange(PacketSendEvent event, Player player) {
+        plugin.incrementPacketsProcessed();
         WrappedBlockState replacement = plugin.getReplacementBlock();
         if (replacement == null) return;
 
@@ -167,19 +183,22 @@ public final class ChunkListener implements PacketListener {
             boolean modified      = false;
             int     replacementId = plugin.getReplacementBlockId();
             int     voidY         = plugin.getVoidY();
+            int     replacedCount = 0;
 
             for (WrapperPlayServerMultiBlockChange.EncodedBlock block : blocks) {
                 if (block == null) continue;
                 if (block.getY() > voidY) continue;
                 if (block.getBlockId() != replacementId) {
                     block.setBlockId(replacementId);
+                    replacedCount++;
                     modified = true;
                 }
             }
 
             if (modified) {
                 event.markForReEncode(true);
-                plugin.dbg("MULTI_BLOCK_CHANGE modified for " + player.getName());
+                plugin.addBlocksReplaced(replacedCount);
+                plugin.dbg("MULTI_BLOCK_CHANGE modified for " + player.getName() + " (" + replacedCount + " blocks)");
             }
         } catch (Exception e) {
             plugin.dbg("MULTI_BLOCK_CHANGE error: " + e.getMessage());

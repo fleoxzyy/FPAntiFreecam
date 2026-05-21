@@ -6,6 +6,8 @@ import com.github.retrooper.packetevents.event.PacketListenerPriority;
 import com.github.retrooper.packetevents.protocol.world.states.WrappedBlockState;
 import io.github.retrooper.packetevents.factory.spigot.SpigotPacketEventsBuilder;
 import org.bukkit.Bukkit;
+import org.bukkit.FluidCollisionMode;
+import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -18,13 +20,16 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
+import org.bukkit.event.player.PlayerGameModeChangeEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.generator.WorldInfo;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.StringUtil;
+import org.bukkit.util.Vector;
 
 import java.io.File;
 import java.io.InputStream;
@@ -38,6 +43,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 /**
@@ -69,6 +75,16 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
      */
     private final Set<UUID> internallyTeleporting      = ConcurrentHashMap.newKeySet();
 
+    // ── Stats counters ────────────────────────────────────────────────────
+    /** Total outbound chunk/block packets intercepted and modified. */
+    public final AtomicLong totalPacketsProcessed = new AtomicLong();
+    /** Total chunk sections that had at least one block replaced. */
+    public final AtomicLong totalChunksModified   = new AtomicLong();
+    /** Total individual blocks replaced with the void replacement. */
+    public final AtomicLong totalBlocksReplaced   = new AtomicLong();
+    /** System.currentTimeMillis() recorded at onEnable(). */
+    private long enabledAt = 0;
+
     // ── Config-driven values ──────────────────────────────────────────────
     private WrappedBlockState replacementBlockState;
     private int               replacementBlockId    = 0;
@@ -91,6 +107,25 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private int     preLoadDistance          = 10;
     private boolean forceImmediateRefresh    = true;
 
+    // ── Raycast config ────────────────────────────────────────────────────
+    /**
+     * When true, a periodic task checks players who are just below surfaceY.
+     * If they are looking upward (or have a clear vertical line of sight to
+     * the surface), protection is armed so FreeCam cannot exploit cave openings.
+     */
+    private boolean raycastEnabled   = true;
+    /**
+     * Blocks below surfaceY within which the raycast check runs.
+     * Players deeper than (surfaceY - raycastZone) are NOT checked.
+     */
+    private double  raycastZone      = 8.0;
+    /**
+     * Minimum upward component of the look-vector (0–1) required to trigger
+     * the look-direction condition of the raycast check.
+     * ~0.15 ≈ roughly 9° above horizontal.
+     */
+    private double  raycastMinUpward = 0.15;
+
     // ── Language config ───────────────────────────────────────────────────
     private FileConfiguration langConfig;
     private String            currentLanguage = "en";
@@ -110,18 +145,15 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         instance = this;
         getLogger().info("onLoad() – building PacketEvents…");
 
-        // PacketEvents MUST be built and loaded during onLoad, before onEnable.
         PacketEvents.setAPI(SpigotPacketEventsBuilder.build(this));
         PacketEventsAPI<?> api = PacketEvents.getAPI();
         if (api == null) {
             getLogger().severe("[FPAntiFreeCam] PacketEvents API is null after build – aborting load.");
             return;
         }
-        
         api.getSettings()
                 .checkForUpdates(false)
                 .bStats(true);
-        
         api.load();
         if (!api.isLoaded()) {
             getLogger().severe("[FPAntiFreeCam] PacketEvents failed to load – plugin will be disabled.");
@@ -130,12 +162,10 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
     @Override
     public void onEnable() {
-        // ── Banner ─────────────────────────────────────────────────────────
         ChatUtil.printBanner(ChatUtil.startupBanner(
                 getDescription().getVersion(),
                 PlatformUtil.getPlatformName()));
 
-        // ── Validate PacketEvents ──────────────────────────────────────────
         PacketEventsAPI<?> api = PacketEvents.getAPI();
         if (api == null || !api.isLoaded()) {
             getLogger().severe(lang("error.packetevents-unavailable"));
@@ -143,10 +173,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             return;
         }
 
-        // ── Config + language ──────────────────────────────────────────────
         loadConfigValues();
 
-        // ── Sub-systems ────────────────────────────────────────────────────
         bedrockSupport = new BedrockSupport(this);
         entityHider    = new EntityHider(this);
 
@@ -158,25 +186,23 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             getLogger().info("[FPAntiFreeCam] Paper/Spigot tick-batching scheduler enabled.");
         }
 
-        // ── Initialise replacement block ───────────────────────────────────
         if (!initReplacementBlock()) {
             getLogger().severe(lang("error.block-state-null"));
             getServer().getPluginManager().disablePlugin(this);
             return;
         }
 
-        // ── Register packet listener ───────────────────────────────────────
         api.getEventManager().registerListener(new ChunkListener(this), PacketListenerPriority.NORMAL);
-
-        // PacketEvents.init() must be called on the main thread after
-        // all packet listeners have been registered.
         api.init();
 
-        // ── Register Bukkit events + commands ──────────────────────────────
         getServer().getPluginManager().registerEvents(this, this);
         registerCommands();
 
-        // ── Handle already-online players (e.g. after /reload) ────────────
+        // Record startup time and launch the raycast monitor.
+        enabledAt = System.currentTimeMillis();
+        startRaycastTask();
+
+        // Handle already-online players (e.g. after /reload).
         try {
             for (Player p : Bukkit.getOnlinePlayers()) {
                 if (isWorldProtected(p.getWorld().getName())) {
@@ -194,11 +220,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public void onDisable() {
         ChatUtil.printBanner(ChatUtil.shutdownBanner());
 
-        // Restore normal view for all players before we stop intercepting packets.
         if (entityHider != null) {
             entityHider.refreshAll();
         }
-
         if (paperScheduler != null) {
             paperScheduler.shutdown();
         }
@@ -217,40 +241,33 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     //  Public API – consumed by ChunkListener, EntityHider, schedulers, etc.
     // ═════════════════════════════════════════════════════════════════════
 
-    /**
-     * Returns true when the given world name is in the protected worlds list.
-     * Null-safe.
-     */
     public boolean isWorldProtected(String worldName) {
         return worldName != null && protectedWorlds.contains(worldName);
     }
 
-    /**
-     * Returns true when the player should currently receive the void-blocks
-     * treatment: they are in a protected world, above surface-y, and do NOT
-     * hold the bypass permission.
-     */
     public boolean isProtectionActive(Player player) {
         if (player == null) return false;
         if (player.hasPermission("fpantifreecam.bypass")) return false;
         return Boolean.TRUE.equals(playerHiddenState.get(player.getUniqueId()));
     }
 
-    /** The WrappedBlockState that replaces hidden blocks in outbound packets. */
     public WrappedBlockState getReplacementBlock() { return replacementBlockState; }
+    public int getReplacementBlockId()             { return replacementBlockId;    }
+    public int getVoidY()                          { return voidY;                 }
 
-    /** Global numeric ID of the replacement block (fast equality in packet handlers). */
-    public int getReplacementBlockId() { return replacementBlockId; }
-
-    /** The Y boundary: blocks at-or-below this value are hidden. */
-    public int getVoidY() { return voidY; }
-
-    /** Logs a debug message if debug mode is enabled. */
     public void dbg(String message) {
         if (debugMode) {
             getLogger().info("[FPAntiFreeCam DEBUG] " + message);
         }
     }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  Public stats incrementers (called from ChunkListener)
+    // ═════════════════════════════════════════════════════════════════════
+
+    public void incrementPacketsProcessed() { totalPacketsProcessed.incrementAndGet(); }
+    public void incrementChunksModified()   { totalChunksModified.incrementAndGet();   }
+    public void addBlocksReplaced(long n)   { totalBlocksReplaced.addAndGet(n);        }
 
     // ═════════════════════════════════════════════════════════════════════
     //  Config & language loading
@@ -281,6 +298,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         preLoadDistance       = cfg.getInt("performance.instant-protection.pre-load-distance", 10);
         forceImmediateRefresh = cfg.getBoolean("performance.instant-protection.force-immediate-refresh", true);
 
+        // Raycast settings
+        raycastEnabled   = cfg.getBoolean("protection.raycast.enabled", true);
+        raycastZone      = cfg.getDouble("protection.raycast.zone", 8.0);
+        raycastMinUpward = cfg.getDouble("protection.raycast.min-upward-angle", 0.15);
+
         loadLanguageConfig(cfg.getString("settings.language", "en"));
 
         if (entityHider != null) entityHider.loadSettings();
@@ -288,7 +310,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         dbg("Config loaded – worlds=" + protectedWorlds
                 + " surfaceY=" + surfaceY
                 + " voidY=" + voidY
-                + " block=" + replacementBlockType);
+                + " block=" + replacementBlockType
+                + " raycast=" + raycastEnabled + "(zone=" + raycastZone + ")");
     }
 
     private void loadLanguageConfig(String language) {
@@ -298,10 +321,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         if (!langDir.exists()) langDir.mkdirs();
         if (!langFile.exists()) {
-            // Try to save from jar resources
             try { saveResource("lang/" + language + ".yml", false); }
             catch (Exception ignored) {
-                // Language file not bundled – fall back to en
                 try { saveResource("lang/en.yml", false); }
                 catch (Exception ignored2) {}
             }
@@ -309,7 +330,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         langConfig = YamlConfiguration.loadConfiguration(langFile);
 
-        // Merge defaults from jar so missing keys fall back gracefully
         InputStream defStream = getResource("lang/" + language + ".yml");
         if (defStream == null) defStream = getResource("lang/en.yml");
         if (defStream != null) {
@@ -317,14 +337,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                     new InputStreamReader(defStream, StandardCharsets.UTF_8));
             langConfig.setDefaults(defaults);
         }
-
         dbg("Language loaded: " + language);
     }
 
-    /**
-     * Resolves a message key from the current language file, fills in {0}…{N}
-     * placeholders and translates '&amp;' colour codes.
-     */
     public String lang(String key, Object... args) {
         String msg = (langConfig != null)
                 ? langConfig.getString("messages." + key, key)
@@ -335,12 +350,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         return ChatUtil.color(msg);
     }
 
-    // ── Block-state initialisation ────────────────────────────────────────
-
-    /**
-     * Tries the configured block type first, then falls back through sensible
-     * defaults. Returns false only if every candidate fails.
-     */
     private boolean initReplacementBlock() {
         String[] candidates = { replacementBlockType, "minecraft:air", "minecraft:stone", "minecraft:dirt" };
         for (String candidate : candidates) {
@@ -364,16 +373,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     //  Player state management
     // ═════════════════════════════════════════════════════════════════════
 
-    /**
-     * Evaluates whether the player should be in the hidden or visible state
-     * based on their current Y and world, then optionally triggers a chunk
-     * refresh so the change is applied immediately.
-     *
-     * @param immediateRefresh when true, forces a full chunk refresh right away.
-     */
     public void handlePlayerInitialState(Player player, boolean immediateRefresh) {
         if (!isWorldProtected(player.getWorld().getName())) {
-            // Player is in an unprotected world – clear any lingering state.
             boolean wasCached = playerHiddenState.remove(player.getUniqueId()) != null;
             if (wasCached && immediateRefresh) refreshFullView(player);
             return;
@@ -386,11 +387,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 + " Y=" + String.format("%.1f", player.getLocation().getY()));
 
         if (entityHider != null) entityHider.updateFor(player);
-
         if (shouldHide || immediateRefresh) refreshFullView(player);
     }
 
-    /** Refreshes all chunks in the server view-distance around the player. */
     public void refreshFullView(Player player) {
         int radius = Bukkit.getViewDistance();
         if (limitedAreaEnabled) radius = Math.min(radius, limitedAreaRadius);
@@ -403,8 +402,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (!player.isOnline()) return;
         if (!isWorldProtected(player.getWorld().getName())) return;
 
-        // On Folia, make sure we're on the correct region thread before calling
-        // world.refreshChunk(); if not, re-schedule to the right region.
         if (!PlatformUtil.isOwnedByCurrentRegion(player.getLocation())) {
             final int fr = radius;
             PlatformUtil.runTask(this, player.getLocation(), () -> performRefresh(player, fr));
@@ -416,7 +413,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         } else if (paperScheduler != null) {
             paperScheduler.refreshChunks(player, radius);
         } else {
-            // Bare-minimum fallback (single-threaded, synchronous)
             World  world = player.getWorld();
             int    px    = player.getLocation().getBlockX() >> 4;
             int    pz    = player.getLocation().getBlockZ() >> 4;
@@ -426,6 +422,115 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 }
             }
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  Raycast activation task
+    // ═════════════════════════════════════════════════════════════════════
+
+    /**
+     * Starts a low-frequency task (every 5 ticks / 250 ms) that checks players
+     * who are physically below surfaceY but within {@code raycastZone} blocks of
+     * it.  If they are looking upward <em>or</em> have an unobstructed vertical
+     * line-of-sight to the surface, protection is armed so FreeCam cannot
+     * exploit a cave opening or upward camera angle to peer underground.
+     */
+    private void startRaycastTask() {
+        if (!raycastEnabled) return;
+        Runnable check = () -> {
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                if (isWorldProtected(p.getWorld().getName())
+                        && !p.hasPermission("fpantifreecam.bypass")) {
+                    checkRaycastActivation(p);
+                }
+            }
+        };
+        if (FoliaScheduler.shouldUse()) {
+            try {
+                Object sched = Bukkit.class.getMethod("getGlobalRegionScheduler").invoke(null);
+                sched.getClass()
+                        .getMethod("runAtFixedRate",
+                                org.bukkit.plugin.Plugin.class,
+                                java.util.function.Consumer.class,
+                                long.class, long.class)
+                        .invoke(sched, this,
+                                (java.util.function.Consumer<Object>) t -> check.run(),
+                                5L, 5L);
+            } catch (Exception e) {
+                getLogger().warning("[FPAntiFreeCam] Folia raycast task init failed, falling back: " + e.getMessage());
+                Bukkit.getScheduler().runTaskTimer(this, check, 5L, 5L);
+            }
+        } else {
+            Bukkit.getScheduler().runTaskTimer(this, check, 5L, 5L);
+        }
+    }
+
+    /**
+     * Checks whether a player who is <em>below</em> surfaceY should still have
+     * protection armed, based on either:
+     * <ol>
+     *   <li>Their look-vector has a meaningful upward component
+     *       (camera angle could expose underground via FreeCam).</li>
+     *   <li>A vertical ray from their eyes to surfaceY hits no solid blocks
+     *       (cave with an opening to the sky – FreeCam can look down into it).</li>
+     * </ol>
+     */
+    private void checkRaycastActivation(Player player) {
+        double eyeY = player.getEyeLocation().getY();
+
+        // Already at/above surface – onPlayerMove handles that range.
+        if (eyeY >= surfaceY) return;
+
+        UUID id = player.getUniqueId();
+
+        // Too far underground: if the state was previously armed by raycast,
+        // release it so the player can see normally while caving.
+        if (eyeY < surfaceY - raycastZone) {
+            if (Boolean.TRUE.equals(playerHiddenState.get(id))) {
+                playerHiddenState.put(id, false);
+                if (entityHider != null) entityHider.updateFor(player);
+                refreshFullView(player);
+                dbg("Raycast deactivated (too deep): " + player.getName()
+                        + " eyeY=" + String.format("%.1f", eyeY));
+            }
+            return;
+        }
+
+        boolean currentHidden = Boolean.TRUE.equals(playerHiddenState.getOrDefault(id, false));
+        boolean shouldHide    = false;
+
+        // Condition 1 – look direction has a meaningful upward component.
+        Vector dir = player.getEyeLocation().getDirection();
+        if (dir.getY() > raycastMinUpward) {
+            shouldHide = true;
+        }
+
+        // Condition 2 – vertical ray from eyes to surfaceY finds no solid block
+        // (the cave has an opening or thin ceiling above the player).
+        if (!shouldHide) {
+            try {
+                Location eye    = player.getEyeLocation();
+                double   distUp = surfaceY - eyeY + 2.0;
+                RayTraceResult rt = player.getWorld().rayTraceBlocks(
+                        eye, new Vector(0, 1, 0), distUp,
+                        FluidCollisionMode.NEVER, true);
+                if (rt == null) shouldHide = true; // unobstructed path to surface
+            } catch (Exception ignored) {}
+        }
+
+        if (shouldHide == currentHidden) return;
+
+        playerHiddenState.put(id, shouldHide);
+        if (entityHider != null) entityHider.updateFor(player);
+
+        if (shouldHide) {
+            performRefresh(player, Bukkit.getViewDistance());
+        } else {
+            refreshFullView(player);
+        }
+        dbg("Raycast " + (shouldHide ? "ON" : "OFF") + ": " + player.getName()
+                + " eyeY=" + String.format("%.1f", eyeY)
+                + " lookY=" + String.format("%.2f", dir.getY()));
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -439,7 +544,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (isWorldProtected(player.getWorld().getName())) {
             handlePlayerInitialState(player, /* immediateRefresh= */ false);
         }
-        // Bedrock support: early detection so the cache is warm for later calls.
         if (bedrockSupport != null && bedrockSupport.isBedrock(player)) {
             dbg("Bedrock player joined: " + player.getName());
         }
@@ -465,20 +569,32 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         dbg("WorldChange: " + player.getName() + " → " + toWorld);
 
         if (isWorldProtected(toWorld)) {
-            // Entered a protected world; force a full refresh to apply hiding immediately.
             handlePlayerInitialState(player, /* immediateRefresh= */ true);
         } else {
-            // Left a protected world; restore the full view.
             boolean wasHidden = playerHiddenState.remove(player.getUniqueId()) != null;
             if (wasHidden) refreshFullView(player);
         }
     }
 
     /**
+     * Re-evaluates protection state when the player switches game modes.
+     * This fixes the creative-mode bug: entering creative and flying to
+     * surfaceY triggers teleport events (not always move events), and the
+     * state must be current before the first chunk refresh fires.
+     */
+    @EventHandler
+    public void onPlayerGameModeChange(PlayerGameModeChangeEvent event) {
+        Player player = event.getPlayer();
+        if (!isWorldProtected(player.getWorld().getName())) return;
+        // Defer by 1 tick so the new game mode is fully applied.
+        PlatformUtil.runTaskLater(this, () -> {
+            if (player.isOnline()) handlePlayerInitialState(player, true);
+        }, 1L);
+    }
+
+    /**
      * Intercepts player teleports to prevent a momentary "void glimpse" when
-     * going from a hiding state to a visible one.  If the player is teleporting
-     * out of hiding we cancel the original event, update the state, then
-     * re-fire the teleport ourselves (tracked via {@code internallyTeleporting}).
+     * going from a hiding state to a visible one.
      */
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onPlayerTeleport(PlayerTeleportEvent event) {
@@ -493,7 +609,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         boolean fromProtected = isWorldProtected(from.getWorld().getName());
 
         if (!toProtected) {
-            // Teleporting into an unprotected world – clear state and restore view.
             if (fromProtected && playerHiddenState.remove(player.getUniqueId()) != null) {
                 final var dest = to;
                 PlatformUtil.runTask(this, dest, () -> {
@@ -503,16 +618,15 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             return;
         }
 
-        // Both worlds are protected (or only destination is).
         UUID    id        = player.getUniqueId();
         boolean bypass    = player.hasPermission("fpantifreecam.bypass");
         boolean oldHidden = Boolean.TRUE.equals(playerHiddenState.getOrDefault(id, to.getY() >= surfaceY));
         boolean newHidden = !bypass && to.getY() >= surfaceY;
 
-        if (oldHidden == newHidden) return; // No state transition – nothing to do.
+        if (oldHidden == newHidden) return;
 
         if (!newHidden) {
-            // Was hiding → now visible.  Cancel + re-teleport to avoid the void flash.
+            // Was hiding → now visible.  Cancel + re-teleport to avoid void flash.
             playerHiddenState.put(id, false);
             event.setCancelled(true);
             final var dest = to;
@@ -526,9 +640,17 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 }
             });
         } else {
-            // Was visible → now hiding.  Update state immediately so the packet
-            // listener starts replacing blocks from the first new chunk send.
+            // Was visible → now hiding.
+            // BUG FIX: must ALSO refresh chunks so already-sent chunks get the
+            // hidden treatment immediately – not just future chunk sends.
+            // This is the root cause of the creative-mode Y-level bug:
+            // creative flight fires teleport events, not always move events.
             playerHiddenState.put(id, true);
+            if (entityHider != null) entityHider.updateFor(player);
+            final var refreshDest = to;
+            PlatformUtil.runTask(this, refreshDest, () -> {
+                if (player.isOnline()) refreshFullView(player);
+            });
         }
     }
 
@@ -545,7 +667,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         Player player    = event.getPlayer();
         String worldName = player.getWorld().getName();
 
-        // Left the protected world during this move tick (edge case on some platforms).
         if (!isWorldProtected(worldName)) {
             if (playerHiddenState.remove(player.getUniqueId()) != null) {
                 refreshFullView(player);
@@ -560,9 +681,17 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         UUID    id        = player.getUniqueId();
         boolean bypass    = player.hasPermission("fpantifreecam.bypass");
         boolean newHidden = !bypass && to.getY() >= surfaceY;
-        boolean oldHidden = Boolean.TRUE.equals(playerHiddenState.getOrDefault(id, newHidden));
 
-        if (newHidden == oldHidden) return; // No crossing – nothing to do.
+        // BUG FIX: if no state entry exists (join/world-change race condition),
+        // initialise it rather than hitting the getOrDefault(id, newHidden) trap
+        // which would make oldHidden == newHidden and silently do nothing.
+        if (!playerHiddenState.containsKey(id)) {
+            handlePlayerInitialState(player, true);
+            return;
+        }
+        boolean oldHidden = Boolean.TRUE.equals(playerHiddenState.get(id));
+
+        if (newHidden == oldHidden) return;
 
         playerHiddenState.put(id, newHidden);
         dbg(String.format("Move transition %s fromY=%.1f toY=%.1f hidden=%b→%b",
@@ -583,7 +712,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 return;
             }
 
-            // Determine radius – expand for instant-protection near the boundary.
             int radius = Bukkit.getViewDistance();
             if (instantProtection && forceImmediateRefresh
                     && to.getY() <= surfaceY + preLoadDistance) {
@@ -682,7 +810,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         };
     }
 
-    // /fpac reload  |  /fpreload
     private boolean handleReload(CommandSender sender) {
         if (!sender.hasPermission("fpantifreecam.reload")) {
             sender.sendMessage(lang("no-permission")); return true;
@@ -690,7 +817,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         loadConfigValues();
         initReplacementBlock();
 
-        // Re-evaluate every online player under the new config.
         for (Player p : Bukkit.getOnlinePlayers()) {
             if (isWorldProtected(p.getWorld().getName())) {
                 handlePlayerInitialState(p, true);
@@ -702,7 +828,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         return true;
     }
 
-    // /fpac debug  |  /fpdebug
     private boolean handleDebug(CommandSender sender) {
         if (!sender.hasPermission("fpantifreecam.debug")) {
             sender.sendMessage(lang("no-permission")); return true;
@@ -716,7 +841,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         return true;
     }
 
-    // /fpac world <list|add|remove> [name]
     private boolean handleWorld(CommandSender sender, String[] args) {
         if (!sender.hasPermission("fpantifreecam.world")) {
             sender.sendMessage(lang("no-permission")); return true;
@@ -770,37 +894,88 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         return true;
     }
 
-    // /fpac stats
+    // /fpac stats  ─────────────────────────────────────────────────────────
     private boolean handleStats(CommandSender sender) {
         if (!sender.hasPermission("fpantifreecam.admin")) {
             sender.sendMessage(lang("no-permission")); return true;
         }
-        long activeCount = playerHiddenState.values().stream().filter(b -> b).count();
 
-        ChatUtil.send(sender, "&3&l=== FPAntiFreeCam Statistics ===");
-        ChatUtil.send(sender, "&eVersion:         &a" + getDescription().getVersion());
-        ChatUtil.send(sender, "&ePlatform:        &a" + PlatformUtil.getPlatformName());
-        ChatUtil.send(sender, "&eActive players:  &a" + activeCount
-                + " &7/ " + Bukkit.getOnlinePlayers().size() + " online");
-        ChatUtil.send(sender, "&eProtected worlds: &a" + protectedWorlds.size() + " &7" + protectedWorlds);
-        ChatUtil.send(sender, "&eVoid Y:          &a" + voidY + "  &eSurface Y: &a" + surfaceY);
-        ChatUtil.send(sender, "&eReplacement:     &a" + replacementBlockType
-                + " &7(id=" + replacementBlockId + ")");
-        ChatUtil.send(sender, "&eDebug mode:      &a" + (debugMode ? "ON" : "OFF"));
-        ChatUtil.send(sender, "&eCooldown:        &a" + (refreshCooldownMs / 1_000) + "s");
+        // ── Player counts ─────────────────────────────────────────────────
+        long activeCount = playerHiddenState.values().stream().filter(b -> b).count();
+        long onlineCount = Bukkit.getOnlinePlayers().size();
+
+        // ── TPS ───────────────────────────────────────────────────────────
+        String tpsStr;
+        try {
+            double[] tps = Bukkit.getServer().getTPS();
+            double t1 = Math.min(tps[0], 20.0);
+            double t5 = Math.min(tps[1], 20.0);
+            double t15= Math.min(tps[2], 20.0);
+            String c1 = t1  >= 18 ? "&a" : t1  >= 15 ? "&e" : "&c";
+            String c5 = t5  >= 18 ? "&a" : t5  >= 15 ? "&e" : "&c";
+            String c15= t15 >= 18 ? "&a" : t15 >= 15 ? "&e" : "&c";
+            tpsStr = String.format("%s%.2f &7/ %s%.2f &7/ %s%.2f &8(1m/5m/15m)",
+                    c1, t1, c5, t5, c15, t15);
+        } catch (Exception e) { tpsStr = "&7N/A"; }
+
+        // ── Memory ────────────────────────────────────────────────────────
+        Runtime rt    = Runtime.getRuntime();
+        long usedMB   = (rt.totalMemory() - rt.freeMemory()) / 1_048_576L;
+        long maxMB    = rt.maxMemory() / 1_048_576L;
+        int  memPct   = (int)(usedMB * 100L / Math.max(maxMB, 1L));
+        String memC   = memPct >= 90 ? "&c" : memPct >= 70 ? "&e" : "&a";
+        String memStr = memC + usedMB + " MB &7/ &f" + maxMB + " MB &8(" + memPct + "%)";
+
+        // ── Uptime ────────────────────────────────────────────────────────
+        long upSec  = (System.currentTimeMillis() - enabledAt) / 1_000L;
+        long upMin  = upSec / 60L; upSec %= 60L;
+        long upHour = upMin / 60L; upMin %= 60L;
+        String uptimeStr = String.format("&e%dh &e%dm &e%ds", upHour, upMin, upSec);
+
+        // ── Output ────────────────────────────────────────────────────────
+        String sep = "&8" + "─".repeat(46);
+        ChatUtil.send(sender, sep);
+        ChatUtil.send(sender, "&b&l  FPAntiFreeCam &fv" + getDescription().getVersion()
+                + "  &8— &7Runtime Statistics");
+        ChatUtil.send(sender, sep);
+        ChatUtil.send(sender, " &7Platform    &8: &f" + PlatformUtil.getPlatformName());
+        ChatUtil.send(sender, " &7Uptime      &8: " + uptimeStr);
+        ChatUtil.send(sender, " &7TPS         &8: " + tpsStr);
+        ChatUtil.send(sender, " &7Memory      &8: " + memStr);
+        ChatUtil.send(sender, sep);
+        ChatUtil.send(sender, " &7Protected   &8: &a" + activeCount
+                + " &7active &8/ &f" + onlineCount + " &7online");
+        ChatUtil.send(sender, " &7Worlds      &8: &a" + protectedWorlds.size()
+                + " &8— &7" + protectedWorlds);
+        ChatUtil.send(sender, " &7Surface Y   &8: &e" + surfaceY
+                + "  &7Void Y &8: &e" + voidY);
+        ChatUtil.send(sender, " &7Block       &8: &f" + replacementBlockType
+                + " &8(id=" + replacementBlockId + ")");
+        ChatUtil.send(sender, " &7Raycast     &8: " + (raycastEnabled
+                ? "&aON &8| &7zone &8= &e" + (int)raycastZone
+                + " &8| &7minUpY &8= &e" + raycastMinUpward
+                : "&cOFF"));
+        ChatUtil.send(sender, sep);
+        ChatUtil.send(sender, " &7Pkts proc   &8: &e" + totalPacketsProcessed.get()
+                + " &8(all chunk/block packets intercepted)");
+        ChatUtil.send(sender, " &7Chunks mod  &8: &e" + totalChunksModified.get()
+                + " &8(chunks with ≥1 block replaced)");
+        ChatUtil.send(sender, " &7Blocks rep  &8: &e" + totalBlocksReplaced.get()
+                + " &8(total underground blocks hidden)");
+        ChatUtil.send(sender, " &7Cooldown    &8: &a" + (refreshCooldownMs / 1_000)
+                + "s  &7Debug &8: " + (debugMode ? "&aON" : "&7OFF"));
         if (bedrockSupport != null)
-            ChatUtil.send(sender, "&eBedrock:         &a" + bedrockSupport.statusLine());
+            ChatUtil.send(sender, " &7Bedrock     &8: &a" + bedrockSupport.statusLine());
         if (entityHider != null)
-            ChatUtil.send(sender, "&eEntityHider:     &a" + entityHider.stats());
+            ChatUtil.send(sender, " &7EntityHider &8: &a" + entityHider.stats());
         if (foliaScheduler != null)
-            ChatUtil.send(sender, "&eFoliaScheduler:  &a" + foliaScheduler.stats());
+            ChatUtil.send(sender, " &7Folia Sched &8: &a" + foliaScheduler.stats());
         if (paperScheduler != null)
-            ChatUtil.send(sender, "&ePaperScheduler:  &a" + paperScheduler.stats());
-        ChatUtil.send(sender, "&3&l=================================");
+            ChatUtil.send(sender, " &7Paper Sched &8: &a" + paperScheduler.stats());
+        ChatUtil.send(sender, sep);
         return true;
     }
 
-    // /fpac bypass <player>  – toggles bypass for that player this session
     private boolean handleBypass(CommandSender sender, String[] args) {
         if (!sender.hasPermission("fpantifreecam.bypass")) {
             sender.sendMessage(lang("no-permission")); return true;
@@ -812,7 +987,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (target == null) {
             ChatUtil.sendError(sender, lang("bypass-unknown", args[0])); return true;
         }
-        // Force the player out of the hidden state and refresh so they see normally.
         playerHiddenState.put(target.getUniqueId(), false);
         if (entityHider != null) entityHider.updateFor(target);
         refreshFullView(target);
@@ -820,23 +994,21 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         return true;
     }
 
-    // /fpac help
     private boolean handleHelp(CommandSender sender) {
         ChatUtil.send(sender, lang("help-header"));
         List<String> lines = langConfig != null
                 ? langConfig.getStringList("messages.help-lines")
                 : Collections.emptyList();
         if (lines.isEmpty()) {
-            // Built-in fallback
             for (String l : new String[]{
-                "&e/fpac reload    &7– Reload config & language",
-                "&e/fpac debug     &7– Toggle debug logging",
-                "&e/fpac world <list|add|remove> [name]  &7– Manage worlds",
-                "&e/fpac stats     &7– Show runtime statistics",
-                "&e/fpac bypass <player>  &7– Force-clear protection for a player",
-                "&e/fpac help      &7– Show this help",
-                "&e/fpreload       &7– Alias: reload",
-                "&e/fpdebug        &7– Alias: debug"
+                    "&e/fpac reload    &7– Reload config & language",
+                    "&e/fpac debug     &7– Toggle debug logging",
+                    "&e/fpac world <list|add|remove> [name]  &7– Manage worlds",
+                    "&e/fpac stats     &7– Show runtime statistics",
+                    "&e/fpac bypass <player>  &7– Force-clear protection for a player",
+                    "&e/fpac help      &7– Show this help",
+                    "&e/fpreload       &7– Alias: reload",
+                    "&e/fpdebug        &7– Alias: debug"
             }) { ChatUtil.send(sender, l); }
         } else {
             lines.forEach(l -> ChatUtil.send(sender, ChatUtil.color(l)));
@@ -854,32 +1026,23 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         saveConfig();
     }
 
-    /**
-     * Checks the 'config-version' field and merges missing keys from the default
-     * config into the existing file if necessary.
-     */
     private void checkConfigVersion() {
         FileConfiguration cfg = getConfig();
         int currentVer = cfg.getInt("config-version", 0);
-        int latestVer  = 1; // Current latest version
+        int latestVer  = 1;
 
         if (currentVer < latestVer) {
             getLogger().info("[FPAntiFreeCam] Updating config.yml to version " + latestVer + "...");
-            
-            // Set defaults from the jar's config.yml
             InputStream defStream = getResource("config.yml");
             if (defStream != null) {
-                YamlConfiguration defConfig = YamlConfiguration.loadConfiguration(new InputStreamReader(defStream, StandardCharsets.UTF_8));
-                
-                // Copy missing keys from default to current
+                YamlConfiguration defConfig = YamlConfiguration.loadConfiguration(
+                        new InputStreamReader(defStream, StandardCharsets.UTF_8));
                 for (String key : defConfig.getKeys(true)) {
                     if (!cfg.contains(key)) {
                         cfg.set(key, defConfig.get(key));
                     }
                 }
             }
-            
-            // Update the version number
             cfg.set("config-version", latestVer);
             saveConfig();
             getLogger().info("[FPAntiFreeCam] Config update complete.");
