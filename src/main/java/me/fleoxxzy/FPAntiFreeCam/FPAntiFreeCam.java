@@ -390,7 +390,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         }
 
         boolean bypass     = player.hasPermission("fpantifreecam.bypass");
-        boolean shouldHide = !bypass && (player.getLocation().getY() >= surfaceY || isExposedToSky(player));
+        // Protection is "armed" if above surfaceY. 
+        // We will do more granular per-packet checks in ChunkListener.
+        boolean shouldHide = !bypass && player.getLocation().getY() >= surfaceY;
         playerHiddenState.put(player.getUniqueId(), shouldHide);
         dbg("InitialState " + player.getName() + " hidden=" + shouldHide
                 + " Y=" + String.format("%.1f", player.getLocation().getY()));
@@ -689,8 +691,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         UUID    id        = player.getUniqueId();
         boolean bypass    = player.hasPermission("fpantifreecam.bypass");
-        boolean isSky     = isExposedToSky(player);
-        boolean newHidden = !bypass && (to.getY() >= surfaceY || isSky);
+        boolean newHidden = !bypass && to.getY() >= surfaceY;
 
         // BUG FIX: if no state entry exists (join/world-change race condition),
         // initialise it rather than hitting the getOrDefault(id, newHidden) trap

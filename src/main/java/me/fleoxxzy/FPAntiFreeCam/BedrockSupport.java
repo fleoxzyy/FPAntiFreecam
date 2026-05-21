@@ -105,8 +105,8 @@ public final class BedrockSupport {
     }
 
     public String statusLine() {
-        return "Geyser:" + (geyserAvailable ? "✓" : "✗")
-             + "  Floodgate:" + (floodgateAvailable ? "✓" : "✗")
+        return "Geyser: " + geyserAvailable
+             + "  Floodgate: " + floodgateAvailable
              + "  Bedrock cached:" + bedrockCache.size();
     }
 

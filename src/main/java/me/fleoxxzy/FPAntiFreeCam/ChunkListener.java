@@ -99,8 +99,22 @@ public final class ChunkListener implements PacketListener {
         int     voidY         = plugin.getVoidY();
         int     replacementId = plugin.getReplacementBlockId();
 
-        // Early-out: if world minY is already above voidY, no blocks in this world can be hidden.
-        if (minY > voidY) return;
+        // The "Effective Void Y": 
+        // If the player is above surfaceY, we hide everything below voidY.
+        // If the player is deep underground (below surfaceY), we ONLY hide blocks 
+        // that are significantly below them (e.g., playerY - 32) to prevent the "void floor" 
+        // while still hiding the actual deep void if they look down.
+        double playerY = player.getLocation().getY();
+        int effectiveVoidY = voidY;
+        
+        if (playerY < plugin.getVoidY() + 10) {
+            // Player is deep underground; push the "void" further down so they can see.
+            // We hide blocks 32 blocks below them, but never above the configured voidY.
+            effectiveVoidY = Math.min(voidY, (int)playerY - 32);
+        }
+
+        // Early-out: if world minY is already above effectiveVoidY, no blocks can be hidden.
+        if (minY > effectiveVoidY) return;
 
         boolean modified      = false;
         long    replacedCount = 0;
@@ -111,12 +125,12 @@ public final class ChunkListener implements PacketListener {
 
             int sectionBaseY = minY + si * 16;
 
-            // Optimization: skip the whole section if its bottom is already above voidY.
-            if (sectionBaseY > voidY) continue;
+            // Optimization: skip the whole section if its bottom is already above effectiveVoidY.
+            if (sectionBaseY > effectiveVoidY) continue;
 
             for (int ly = 0; ly < 16; ly++) {
                 int worldY = sectionBaseY + ly;
-                if (worldY > voidY) break; // Optimization: skip remaining layers in this section
+                if (worldY > effectiveVoidY) break; 
 
                 for (int lx = 0; lx < 16; lx++) {
                     for (int lz = 0; lz < 16; lz++) {
@@ -154,7 +168,13 @@ public final class ChunkListener implements PacketListener {
             Vector3i pos = wrapper.getBlockPosition();
             if (pos == null) return;
 
-            if (pos.getY() > plugin.getVoidY()) return;
+            double playerY = player.getLocation().getY();
+            int effectiveVoidY = plugin.getVoidY();
+            if (playerY < plugin.getVoidY() + 10) {
+                effectiveVoidY = Math.min(plugin.getVoidY(), (int)playerY - 32);
+            }
+
+            if (pos.getY() > effectiveVoidY) return;
 
             int replacementId = plugin.getReplacementBlockId();
             if (wrapper.getBlockState().getGlobalId() != replacementId) {
@@ -185,9 +205,15 @@ public final class ChunkListener implements PacketListener {
             int     voidY         = plugin.getVoidY();
             int     replacedCount = 0;
 
+            double playerY = player.getLocation().getY();
+            int effectiveVoidY = voidY;
+            if (playerY < voidY + 10) {
+                effectiveVoidY = Math.min(voidY, (int)playerY - 32);
+            }
+
             for (WrapperPlayServerMultiBlockChange.EncodedBlock block : blocks) {
                 if (block == null) continue;
-                if (block.getY() > voidY) continue;
+                if (block.getY() > effectiveVoidY) continue;
                 if (block.getBlockId() != replacementId) {
                     block.setBlockId(replacementId);
                     replacedCount++;
