@@ -1,6 +1,6 @@
 # FPAntiFreeCam
 
-**FPAntiFreeCam** is a high-performance, region-aware Anti-Xray and Anti-FreeCam plugin for Minecraft servers. It prevents players from using FreeCam, FreeLook, and X-ray mods to scout underground bases, mob farms, or hidden structures by replacing underground blocks with air (or a configured replacement) in outbound packets.
+**FPAntiFreeCam** is a high-performance, region-aware Anti-Xray and Anti-FreeCam plugin for Minecraft servers. It prevents players from using FreeCam, and X-ray mods to scout underground bases, mob farms, or hidden structures by replacing underground blocks with air (or a configured replacement) in outbound packets.
 
 Designed for modern Minecraft versions and high-population servers, it features native support for **Paper**, **Folia**, and **Bedrock (via Geyser/Floodgate)**.
 
