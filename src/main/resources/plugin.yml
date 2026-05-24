@@ -9,7 +9,7 @@ description: >
   Anti-FreeCam plugin.
   Hides underground blocks/entities via packet manipulation when a player
   is at or above the configured surface Y level, making FreeCam mods see void.
-website: https://github.com/Fleoxzyy/FPAntiFreeCam
+website: https://github.com/fleoxzyy/FPAntiFreeCam
 softdepend: [ Geyser-Spigot, floodgate ]
 
 commands:
