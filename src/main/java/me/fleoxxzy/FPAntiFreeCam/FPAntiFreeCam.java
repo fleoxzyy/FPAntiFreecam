@@ -421,17 +421,23 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     }
 
     public void refreshFullView(Player player) {
+        refreshFullView(player, false);
+    }
+
+    public void refreshFullView(Player player, boolean bypassCooldown) {
         long now = System.currentTimeMillis();
-        long expiration = refreshCooldowns.getOrDefault(player.getUniqueId(), 0L);
-        if (now < expiration) return;
+        if (!bypassCooldown) {
+            long expiration = refreshCooldowns.getOrDefault(player.getUniqueId(), 0L);
+            if (now < expiration) return;
+        }
 
         int radius = Bukkit.getViewDistance();
         if (limitedAreaEnabled) radius = Math.min(radius, limitedAreaRadius);
         if (bedrockSupport  != null) radius = bedrockSupport.optimisedRadius(player, radius);
         
-        dbg("refreshFullView → " + player.getName() + " radius=" + radius);
+        dbg("refreshFullView → " + player.getName() + " radius=" + radius + " (bypass=" + bypassCooldown + ")");
         performRefresh(player, radius);
-        refreshCooldowns.put(player.getUniqueId(), now + refreshCooldownMs);
+        if (!bypassCooldown) refreshCooldowns.put(player.getUniqueId(), now + refreshCooldownMs);
     }
 
     private void performRefresh(Player player, int radius) {
@@ -548,16 +554,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         boolean targetHidden;
 
         // Determine target state based on altitude.
-        // Priority 1: hard deactivation floor.
         if (feetY < deepDeactivationY) {
             targetHidden = false;
-        } 
-        // Priority 2: surface activation.
-        else if (feetY >= surfaceY) {
+        } else if (feetY >= surfaceY) {
             targetHidden = true;
-        } 
-        // Layer 2: Raycast zone.
-        else {
+        } else {
             targetHidden = calculateRaycast(player);
         }
 
@@ -566,7 +567,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             return;
         }
 
-        // State mismatch - handle debounce
         long now = System.currentTimeMillis();
         long pendingStart = raycastDeactivationPending.getOrDefault(id, 0L);
 
@@ -575,37 +575,30 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             return;
         }
 
-        // Debounce: 100ms for activation (security), raycastDebounceMs for deactivation (stability).
         long debounce = targetHidden ? 100L : raycastDebounceMs;
         if (now - pendingStart < debounce) return;
 
-        // Apply change
         raycastDeactivationPending.remove(id);
         
-        // Final cooldown check for activations to prevent chunk spam
-        if (targetHidden && now < refreshCooldowns.getOrDefault(id, 0L)) return;
-
         playerHiddenState.put(id, targetHidden);
         if (entityHider != null) entityHider.updateFor(player);
-        refreshFullView(player);
+        
+        // Pass bypassCooldown=true when turning OFF protection (targetHidden == false)
+        refreshFullView(player, !targetHidden);
 
         dbg("Layer transition " + (targetHidden ? "ON" : "OFF") + " for " + player.getName() 
                 + " at Y=" + String.format("%.1f", feetY));
     }
 
     private boolean calculateRaycast(Player player) {
-        // We only check for sky access now. 
-        // If the player is in a cave (unobstructed vertical path is BLOCKED),
-        // we deactivate protection even if they look up. 
-        // This makes the transition zone (e.g. Y=21) much more natural.
         try {
             Location eye    = player.getEyeLocation();
-            double   distUp = surfaceY - eye.getY();
+            double   distUp = Math.min(128.0, 320.0 - eye.getY()); // 128 block limit
             if (distUp > 0.5) {
                 RayTraceResult rt = player.getWorld().rayTraceBlocks(
                         eye, new Vector(0, 1, 0), distUp,
                         FluidCollisionMode.NEVER, true);
-                if (rt == null) return true; // unobstructed path to surface -> arm protection
+                if (rt == null) return true; // unobstructed path
             }
         } catch (Exception ignored) {}
 
