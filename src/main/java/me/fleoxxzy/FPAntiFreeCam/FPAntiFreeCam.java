@@ -266,7 +266,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public boolean isProtectionActive(Player player) {
         if (player == null) return false;
         if (player.hasPermission("fpantifreecam.bypass")) return false;
-        return Boolean.TRUE.equals(playerHiddenState.get(player.getUniqueId()));
+        boolean active = Boolean.TRUE.equals(playerHiddenState.get(player.getUniqueId()));
+        if (active) dbg("Protection active for " + player.getName());
+        return active;
     }
 
     public WrappedBlockState getReplacementBlock() { return replacementBlockState; }
@@ -567,6 +569,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             return;
         }
 
+        dbg("DEBUG: State mismatch for " + player.getName() + " current=" + currentHidden + " target=" + targetHidden + " Y=" + feetY);
+        
         long now = System.currentTimeMillis();
         long pendingStart = raycastDeactivationPending.getOrDefault(id, 0L);
 
@@ -780,9 +784,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         if (newHidden == oldHidden) return;
 
+        dbg("Move transition - changing state for " + player.getName() + ": " + oldHidden + " -> " + newHidden + " at Y=" + to.getY());
         playerHiddenState.put(id, newHidden);
-        dbg(String.format("Move transition %s fromY=%.1f toY=%.1f hidden=%b→%b",
-                player.getName(), from.getY(), to.getY(), oldHidden, newHidden));
 
         if (entityHider != null) entityHider.updateFor(player);
 
