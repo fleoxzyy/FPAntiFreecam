@@ -514,8 +514,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             return;
         }
 
-        boolean bypass     = player.hasPermission("fpantifreecam.bypass")
-                          || manualBypass.contains(player.getUniqueId());
+        boolean bypass     = hasBypass(player);
         boolean shouldHide = !bypass && player.getLocation().getY() >= protectionY;
         playerHiddenState.put(player.getUniqueId(), shouldHide);
         dbg("InitialState " + player.getName() + " hidden=" + shouldHide
@@ -709,7 +708,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         try {
             Location eye    = player.getEyeLocation();
             double   distUp = protectionY - eye.getY();
-            if (distUp <= 0.5) return false; // already at surface
+            if (distUp <= 0.5) return true; // already at surface, unobstructed
 
             // Vertical ray (always checked)
             RayTraceResult rt = player.getWorld().rayTraceBlocks(
@@ -783,15 +782,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         }
     }
 
-    @EventHandler
-    public void onPlayerGameModeChange(PlayerGameModeChangeEvent event) {
-        Player player = event.getPlayer();
-        if (!isWorldProtected(player.getWorld().getName())) return;
-        PlatformUtil.runTaskLater(this, () -> {
-            if (player.isOnline()) handlePlayerInitialState(player, true);
-        }, 1L);
-    }
-
+    // Duplicate onPlayerGameModeChange removed. Replaced by onGameModeChange (MONITOR) below.
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onPlayerTeleport(PlayerTeleportEvent event) {
         Player player = event.getPlayer();
