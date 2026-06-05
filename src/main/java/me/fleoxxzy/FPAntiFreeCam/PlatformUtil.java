@@ -120,6 +120,23 @@ public final class PlatformUtil {
         return Bukkit.getScheduler().runTaskLater(plugin, task, delayTicks);
     }
 
+    /** Schedule a repeating task (global/main thread). */
+    public static BukkitTask runTaskTimer(Plugin plugin, Runnable task, long delayTicks, long periodTicks) {
+        if (isFolia() && hasGlobalRegionScheduler()) {
+            try {
+                Object scheduler = Bukkit.class.getMethod("getGlobalRegionScheduler").invoke(null);
+                Method runAtFixedRate = scheduler.getClass()
+                        .getMethod("runAtFixedRate", Plugin.class, Consumer.class, long.class, long.class);
+                Object foliaTask = runAtFixedRate.invoke(scheduler, plugin,
+                        (Consumer<Object>) st -> task.run(), delayTicks < 1 ? 1L : delayTicks, periodTicks < 1 ? 1L : periodTicks);
+                return new FoliaTaskWrapper(foliaTask);
+            } catch (Exception e) {
+                plugin.getLogger().warning("[FPAntiFreeCam] Folia task timer failed, falling back: " + e.getMessage());
+            }
+        }
+        return Bukkit.getScheduler().runTaskTimer(plugin, task, delayTicks, periodTicks);
+    }
+
     /**
      * Returns true if the current thread owns the region for the given location.
      * Always returns true on non-Folia servers (single-threaded).
