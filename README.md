@@ -1,7 +1,7 @@
 # 🛡️ FPAntiFreeCam [Folia Compatible!]
 ### Anti-FreeCam & Anti-Xray Protection
 
-![Banner](https://cdn.modrinth.com/data/cached_images/757f87ae5a0bb66d13650ba3438ec10e7360895a.png)
+![Banner](https://cdn.modrinth.com/data/cached_images/5a285dc33930eb8c81443e43cfa23364e645af71.png)
 
 Protect underground bases, caves, and hidden structures from players using **FreeCam** or **X-Ray** mods. FPAntiFreeCam intercepts outgoing packets and replaces underground blocks with air — so FreeCam users see nothing but void below the surface.
 
