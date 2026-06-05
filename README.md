@@ -26,7 +26,7 @@ Designed for modern Minecraft versions and high-population servers, it features 
 
 ## 💬 Support
 
-Need help? Join our [Discord Server](https://discord.gg/drcf6arhmy) for support and updates!
+Need help? Join our [Discord Server](https://discord.gg/ezA5Q6wGj) for support and updates!
 
 ## ⚙️ Configuration
 
