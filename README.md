@@ -214,7 +214,7 @@ performance:
 
 | Platform | Supported |
 |---|---|
-| Paper 1.19 – 26.1.2+ (including 1.21.11) | ✅ |
+| Paper 1.19 – 26.1.2+ | ✅ |
 | Purpur | ✅ |
 | Spigot | ✅ |
 | Bukkit | ✅ |
