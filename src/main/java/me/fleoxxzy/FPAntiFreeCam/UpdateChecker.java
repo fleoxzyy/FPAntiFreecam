@@ -17,9 +17,9 @@ import java.net.URL;
  */
 public final class UpdateChecker implements Listener {
 
-    private static final String MODRINTH_API = "https://api.modrinth.com/v2/project/fp-antifreecam/version";
-    private static final String MODRINTH_URL = "https://modrinth.com/plugin/fp-antifreecam";
-    private static final String GITHUB_URL   = "https://github.com/Fleoxzyy/FPAntiFreeCam";
+    private static final String MODRINTH_API = "https://api.modrinth.com/v2/project/fpantifreecam/version";
+    private static final String MODRINTH_URL = "https://modrinth.com/plugin/fpantifreecam";
+    private static final String GITHUB_URL   = "https://github.com/fleoxzyy/FPAntiFreeCam";
 
     private final FPAntiFreeCam plugin;
 
@@ -44,7 +44,7 @@ public final class UpdateChecker implements Listener {
                 // Modrinth requires a descriptive User-Agent
                 conn.setRequestProperty("User-Agent",
                         "FPAntiFreeCam/" + plugin.getDescription().getVersion()
-                        + " (modrinth:fp-antifreecam)");
+                        + " (modrinth:fpantifreecam)");
                 conn.setConnectTimeout(5_000);
                 conn.setReadTimeout(5_000);
 
