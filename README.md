@@ -3,15 +3,9 @@
 
 ![Banner](https://cdn.modrinth.com/data/cached_images/5a285dc33930eb8c81443e43cfa23364e645af71.png)
 
-Protect underground bases, caves, and hidden structures from players using **FreeCam** or **X-Ray** mods. FPAntiFreeCam intercepts outgoing packets and replaces underground blocks with air — so FreeCam users see nothing but void below the surface.
+Protect underground bases, caves, and hidden structures from players using **FreeCam** or **X-Ray** mods. FPAntiFreeCam intercepts outgoing packets and replaces underground blocks with air. So FreeCam users see nothing but void below the surface.
 
 > ⚠️ This plugin does **not** block ore X-ray. It is designed to protect **bases, farms, and hidden structures**.
-
----
-
-## 🚀 No Dependencies Required!
-
-Drop it in, configure your worlds, done. Zero libraries to install.
 
 ---
 
@@ -19,15 +13,10 @@ Drop it in, configure your worlds, done. Zero libraries to install.
 
 - 👁️ **Anti-FreeCam / Anti-Xray** — hides all underground blocks via packet manipulation.
 - 📦 **Entity hiding** — conceals mobs, item frames, and farms inside protected zones.
-- 🔍 **Two-layer detection** — hard Y-floor deactivation + raycast zone for cave/ceiling edge cases.
 - 🔔 **Update checker** — notifies admins in-game and in console when a new version is available.
 - ⚡ **Async & optimized** — tick-batched chunk refreshes, minimal performance impact.
 - 🌍 **Universal platform support** — Paper, Purpur, Spigot, Bukkit & Folia (multi-threaded region-aware scheduling).
 - 📱 **Bedrock support** — Geyser / Floodgate compatible.
-- 🛡️ **Robust Edge Case Protection:**
-  - 🔄 **Teleport-Safe:** Prevents 1-tick NBT packet leaks on teleports.
-  - 🚲 **Vehicle-Aware:** Instantly updates protection states upon entering or exiting mounts/vehicles.
-  - 🕶️ **Spectator Friendly:** Automatically bypasses protection for spectator-mode players to prevent vision obscuration.
 
 ---
 
