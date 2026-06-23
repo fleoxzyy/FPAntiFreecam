@@ -214,7 +214,7 @@ performance:
 
 ## 💬 Support
 
-**Discord:** [Join our Discord Server](https://discord.gg/ezA5Q6wGj)
+**Discord:** [Join our Discord Server](https://discord.gg/5XEqzkSwza)
 **GitHub:** [FPAntiFreeCam GitHub](https://github.com/Fleoxzyy/FPAntiFreeCam)
 
 *Secure what players shouldn't see.*
