@@ -24,13 +24,16 @@ import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSo
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSpawnEntity;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
-import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * PacketEvents listener that intercepts outbound chunk/block-change packets
@@ -66,6 +69,55 @@ public final class ChunkListener implements PacketListener {
 
     private final FPAntiFreeCam plugin;
 
+    /**
+     * Thread-safe cache of entity ID → last-known Y coordinate.
+     * Populated from SPAWN_ENTITY packets (which carry the entity's position)
+     * so that ENTITY_SOUND_EFFECT can look up the Y without touching Bukkit API.
+     * This avoids the Folia AsyncCatcher crash caused by calling
+     * world.getEntities() on the Netty IO thread.
+     */
+    private final Map<Integer, Integer> entityYCache = new ConcurrentHashMap<>();
+
+    /**
+     * PERF: Set of packet types that this listener actually handles.
+     * Checked BEFORE any Bukkit API calls (getPlayer, getWorld, hasPermission)
+     * so that the ~90% of outbound packets we don't care about (chat, tab list,
+     * keep-alive, entity metadata, etc.) skip all processing with zero overhead.
+     */
+    private static final Set<PacketType.Play.Server> HANDLED_TYPES;
+    static {
+        Set<PacketType.Play.Server> s = new HashSet<>();
+        s.add(PacketType.Play.Server.CHUNK_DATA);
+        s.add(PacketType.Play.Server.BLOCK_CHANGE);
+        s.add(PacketType.Play.Server.MULTI_BLOCK_CHANGE);
+        s.add(PacketType.Play.Server.BLOCK_ENTITY_DATA);
+        s.add(PacketType.Play.Server.BLOCK_ACTION);
+        s.add(PacketType.Play.Server.EFFECT);
+        s.add(PacketType.Play.Server.SOUND_EFFECT);
+        s.add(PacketType.Play.Server.NAMED_SOUND_EFFECT);
+        s.add(PacketType.Play.Server.ENTITY_SOUND_EFFECT);
+        s.add(PacketType.Play.Server.PARTICLE);
+        s.add(PacketType.Play.Server.SPAWN_ENTITY);
+        s.add(PacketType.Play.Server.SPAWN_LIVING_ENTITY);
+        s.add(PacketType.Play.Server.SPAWN_EXPERIENCE_ORB);
+        s.add(PacketType.Play.Server.SPAWN_PAINTING);
+        HANDLED_TYPES = s;
+    }
+
+    /**
+     * PERF: Cached reflection Field for Column.tileEntities.
+     * Resolved once instead of on every CHUNK_DATA packet.
+     */
+    private static final Field TILE_ENTITIES_FIELD;
+    static {
+        Field f = null;
+        try {
+            f = Column.class.getDeclaredField("tileEntities");
+            f.setAccessible(true);
+        } catch (Exception ignored) {}
+        TILE_ENTITIES_FIELD = f;
+    }
+
     public ChunkListener(FPAntiFreeCam plugin) {
         this.plugin = plugin;
     }
@@ -74,6 +126,13 @@ public final class ChunkListener implements PacketListener {
 
     @Override
     public void onPacketSend(PacketSendEvent event) {
+        // PERF: Check packet type FIRST — this is a cheap enum identity check.
+        // Avoids calling Bukkit.getPlayer(), player.getWorld(), player.hasPermission(),
+        // and player.getGameMode() for the vast majority of outbound packets
+        // (chat, tab list, keep-alive, entity metadata, etc.).
+        if (!(event.getPacketType() instanceof PacketType.Play.Server type)) return;
+        if (!HANDLED_TYPES.contains(type)) return;
+
         User user = event.getUser();
         if (user == null) return;
 
@@ -83,12 +142,26 @@ public final class ChunkListener implements PacketListener {
         Player player = Bukkit.getPlayer(uuid);
         if (player == null || !player.isOnline()) return;
 
+        // SPAWN_ENTITY must cache entity Y even for unprotected players/worlds,
+        // because ENTITY_SOUND_EFFECT for the same entity may arrive later
+        // when the player IS protected.
+        boolean isSpawnPacket = type == PacketType.Play.Server.SPAWN_ENTITY
+                || type == PacketType.Play.Server.SPAWN_LIVING_ENTITY
+                || type == PacketType.Play.Server.SPAWN_EXPERIENCE_ORB
+                || type == PacketType.Play.Server.SPAWN_PAINTING;
+
         World world = player.getWorld();
-        if (world == null || !plugin.isWorldProtected(world.getName())) return;
+        if (world == null || !plugin.isWorldProtected(world.getName())) {
+            // Still cache entity Y for spawn packets in protected worlds
+            if (isSpawnPacket) cacheEntitySpawnY(event);
+            return;
+        }
 
-        if (!plugin.isProtectionActive(player)) return;
-
-        PacketType.Play.Server type = (PacketType.Play.Server) event.getPacketType();
+        if (!plugin.isProtectionActive(player)) {
+            // Still cache entity Y even when protection is inactive
+            if (isSpawnPacket) cacheEntitySpawnY(event);
+            return;
+        }
 
         if (type == PacketType.Play.Server.CHUNK_DATA) {
             handleChunkData(event, player);
@@ -109,10 +182,7 @@ public final class ChunkListener implements PacketListener {
             handleEntitySoundEffect(event, player);
         } else if (type == PacketType.Play.Server.PARTICLE) {
             handleParticle(event, player);
-        } else if (type == PacketType.Play.Server.SPAWN_ENTITY
-                || type == PacketType.Play.Server.SPAWN_LIVING_ENTITY
-                || type == PacketType.Play.Server.SPAWN_EXPERIENCE_ORB
-                || type == PacketType.Play.Server.SPAWN_PAINTING) {
+        } else if (isSpawnPacket) {
             handleEntitySpawn(event, player);
         }
     }
@@ -242,9 +312,11 @@ public final class ChunkListener implements PacketListener {
             if (!changed) return false;
 
             try {
-                Field f = Column.class.getDeclaredField("tileEntities");
-                f.setAccessible(true);
-                f.set(column, filtered.toArray(new TileEntity[0]));
+                if (TILE_ENTITIES_FIELD == null) {
+                    plugin.dbg("tileEntities Field not resolved at class load — skipping");
+                    return false;
+                }
+                TILE_ENTITIES_FIELD.set(column, filtered.toArray(new TileEntity[0]));
                 return true;
             } catch (ReflectiveOperationException | SecurityException ex) {
                 plugin.dbg("Could not update tileEntities via reflection: " + ex.getMessage());
@@ -406,12 +478,15 @@ public final class ChunkListener implements PacketListener {
         plugin.incrementPacketsProcessed();
         try {
             WrapperPlayServerEntitySoundEffect wrapper = new WrapperPlayServerEntitySoundEffect(event);
-            Entity entity = findEntityById(wrapper.getEntityId());
-            if (entity == null || !entity.isValid()) return;
+            int entityId = wrapper.getEntityId();
 
-            if (cancelIfAtOrBelowVoidY(event, player, entity.getLocation().getBlockY())) {
-                plugin.dbg("ENTITY_SOUND_EFFECT cancelled for entity "
-                        + entity.getType() + " at Y=" + entity.getLocation().getBlockY()
+            // Look up cached Y instead of calling world.getEntities() on the Netty thread.
+            Integer cachedY = entityYCache.get(entityId);
+            if (cachedY == null) return; // unknown entity, let it through
+
+            if (cancelIfAtOrBelowVoidY(event, player, cachedY)) {
+                plugin.dbg("ENTITY_SOUND_EFFECT cancelled for entity #"
+                        + entityId + " at Y=" + cachedY
                         + " for " + player.getName());
             }
         } catch (Exception e) {
@@ -440,12 +515,23 @@ public final class ChunkListener implements PacketListener {
      * registers them. Prevents F3 pie-chart spikes and ESP from one-tick leaks
      * before {@link EntityHider} can call hideEntity.
      */
+    /**
+     * Caches the entity's Y from a spawn packet without doing any protection logic.
+     * Called even for unprotected players/worlds so the cache is populated
+     * before a future ENTITY_SOUND_EFFECT arrives.
+     */
+    private void cacheEntitySpawnY(PacketSendEvent event) {
+        try {
+            WrapperPlayServerSpawnEntity wrapper = new WrapperPlayServerSpawnEntity(event);
+            if (wrapper.getEntityType() == EntityTypes.PLAYER) return;
+            Vector3d pos = wrapper.getPosition();
+            if (pos == null) return;
+            entityYCache.put(wrapper.getEntityId(), (int) Math.floor(pos.getY()));
+        } catch (Exception ignored) {}
+    }
+
     private void handleEntitySpawn(PacketSendEvent event, Player player) {
         plugin.incrementPacketsProcessed();
-        // BUGFIX: this cancellation was previously unconditional, ignoring
-        // protection.pie-chart-protection entirely (same issue as the tile-entity
-        // stripping above). Only cancel spawn packets when the setting is enabled.
-        if (!plugin.isPieChartProtectionEnabled()) return;
         try {
             WrapperPlayServerSpawnEntity wrapper = new WrapperPlayServerSpawnEntity(event);
             if (wrapper.getEntityType() == EntityTypes.PLAYER) return;
@@ -453,9 +539,21 @@ public final class ChunkListener implements PacketListener {
             Vector3d pos = wrapper.getPosition();
             if (pos == null) return;
 
-            if (cancelIfAtOrBelowVoidY(event, player, (int) Math.floor(pos.getY()))) {
+            int entityY = (int) Math.floor(pos.getY());
+
+            // Cache the entity's Y for later use by handleEntitySoundEffect.
+            // This runs on the Netty thread where we already have the position
+            // from the packet, so no Bukkit API calls are needed.
+            entityYCache.put(wrapper.getEntityId(), entityY);
+
+            // BUGFIX: this cancellation was previously unconditional, ignoring
+            // protection.pie-chart-protection entirely (same issue as the tile-entity
+            // stripping above). Only cancel spawn packets when the setting is enabled.
+            if (!plugin.isPieChartProtectionEnabled()) return;
+
+            if (cancelIfAtOrBelowVoidY(event, player, entityY)) {
                 plugin.dbg("SPAWN_ENTITY cancelled " + wrapper.getEntityType().getName()
-                        + " at Y=" + (int) Math.floor(pos.getY()) + " for " + player.getName());
+                        + " at Y=" + entityY + " for " + player.getName());
             }
         } catch (Exception e) {
             plugin.dbg("SPAWN_ENTITY error: " + e.getMessage());
@@ -472,12 +570,25 @@ public final class ChunkListener implements PacketListener {
         return true;
     }
 
-    private Entity findEntityById(int entityId) {
-        for (World world : Bukkit.getWorlds()) {
-            for (Entity entity : world.getEntities()) {
-                if (entity.getEntityId() == entityId) return entity;
-            }
-        }
-        return null;
+    /**
+     * Removes a single entity from the Y cache (e.g. on despawn).
+     * Can be called from any thread.
+     */
+    public void removeEntityFromCache(int entityId) {
+        entityYCache.remove(entityId);
+    }
+
+    /**
+     * Clears the entire entity Y cache. Call on plugin disable or reload.
+     */
+    public void clearEntityCache() {
+        entityYCache.clear();
+    }
+
+    /**
+     * Returns the current size of the entity Y cache (for debug/stats).
+     */
+    public int getEntityCacheSize() {
+        return entityYCache.size();
     }
 }

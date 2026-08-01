@@ -113,6 +113,16 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private final Set<UUID> manualBypass = ConcurrentHashMap.newKeySet();
 
     /**
+     * PERF: Thread-safe bypass cache for Netty-thread access.
+     * Maps player UUID → true if the player should bypass protection.
+     * Updated on the main/region thread whenever bypass state could change
+     * (join, quit, world change, gamemode change, permission change, /fpac bypass).
+     * The Netty-thread packet handler reads this instead of calling
+     * player.hasPermission() / player.getGameMode() which are unsafe off-thread.
+     */
+    private final Map<UUID, Boolean> bypassCache = new ConcurrentHashMap<>();
+
+    /**
      * NEW: freeze detection – tracks the last time a player had a meaningful
      * position change (≥0.5 blocks) while above protectionY.
      */
@@ -301,6 +311,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         raycastDeactivationPending.clear();
         internallyTeleporting.clear();
         manualBypass.clear();
+        bypassCache.clear();
         lastSignificantMoveMs.clear();
         lastSignificantMoveLoc.clear();
     }
@@ -313,18 +324,30 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         return worldName != null && protectedWorlds.contains(worldName);
     }
 
+    /**
+     * Full bypass check — calls Bukkit API (hasPermission, getGameMode).
+     * Must only be called from the main/region thread. Updates the bypass cache.
+     */
     public boolean hasBypass(Player player) {
         if (player == null) return false;
-        if (player.getGameMode() == org.bukkit.GameMode.SPECTATOR) return true;
-        if (player.hasPermission("fpantifreecam.bypass")) return true;
-        return manualBypass.contains(player.getUniqueId());
+        boolean bypass = player.getGameMode() == org.bukkit.GameMode.SPECTATOR
+                || player.hasPermission("fpantifreecam.bypass")
+                || manualBypass.contains(player.getUniqueId());
+        bypassCache.put(player.getUniqueId(), bypass);
+        return bypass;
     }
 
+    /**
+     * PERF: Thread-safe protection check for the Netty IO thread.
+     * Uses the cached bypass value instead of calling player.hasPermission()
+     * or player.getGameMode() which are unsafe on async threads.
+     */
     public boolean isProtectionActive(Player player) {
         if (player == null) return false;
-        if (hasBypass(player)) return false;
+        // Use cached bypass — safe from any thread
+        if (Boolean.TRUE.equals(bypassCache.get(player.getUniqueId()))) return false;
         boolean active = Boolean.TRUE.equals(playerHiddenState.get(player.getUniqueId()));
-        if (active) dbg("Protection active for " + player.getName());
+        if (active && debugMode) dbg("Protection active for " + player.getName());
         return active;
     }
 
@@ -581,7 +604,16 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         Runnable check = () -> {
             for (Player p : Bukkit.getOnlinePlayers()) {
                 if (isWorldProtected(p.getWorld().getName()) && !hasBypass(p)) {
-                    checkRaycastActivation(p);
+                    // PERF (Folia): Schedule each player's raycast on the region
+                    // thread that owns their location. rayTraceBlocks() accesses
+                    // world block data which must only happen on the owning thread.
+                    if (PlatformUtil.isFolia()) {
+                        Player captured = p;
+                        PlatformUtil.runTask(this, captured.getLocation(),
+                                () -> { if (captured.isOnline()) checkRaycastActivation(captured); });
+                    } else {
+                        checkRaycastActivation(p);
+                    }
                 }
             }
         };
@@ -748,6 +780,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
         dbg("onPlayerJoin: " + player.getName() + " world=" + player.getWorld().getName());
+        // Update bypass cache on join (main thread — safe to call hasPermission)
+        hasBypass(player);
         if (isWorldProtected(player.getWorld().getName())) {
             handlePlayerInitialState(player, false);
         }
@@ -762,6 +796,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         internallyTeleporting.remove(id);
         lastSignificantMoveMs.remove(id);
         lastSignificantMoveLoc.remove(id);
+        bypassCache.remove(id);
         if (foliaScheduler != null) foliaScheduler.cleanupPlayer(id);
         if (paperScheduler != null) paperScheduler.cleanupPlayer(id);
         if (bedrockSupport  != null) bedrockSupport.cleanupPlayer(id);
@@ -774,6 +809,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         Player player  = event.getPlayer();
         String toWorld = player.getWorld().getName();
         dbg("WorldChange: " + player.getName() + " → " + toWorld);
+        // Refresh bypass cache — permissions may differ per world
+        hasBypass(player);
         if (isWorldProtected(toWorld)) {
             handlePlayerInitialState(player, true);
         } else {
@@ -1015,7 +1052,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         boolean willBypass = (event.getNewGameMode() == org.bukkit.GameMode.SPECTATOR) 
                           || player.hasPermission("fpantifreecam.bypass") 
                           || manualBypass.contains(player.getUniqueId());
-        
+        // Update bypass cache with the new state
+        bypassCache.put(player.getUniqueId(), willBypass);
+
         UUID id = player.getUniqueId();
         boolean currentHidden = Boolean.TRUE.equals(playerHiddenState.get(id));
         
@@ -1331,6 +1370,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (manualBypass.contains(tid)) {
             // Revoke bypass
             manualBypass.remove(tid);
+            hasBypass(target); // refresh cache
             playerHiddenState.remove(tid);
             handlePlayerInitialState(target, true);
             ChatUtil.sendSuccess(sender, lang("bypass-revoked", target.getName()));
@@ -1338,6 +1378,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         } else {
             // Grant bypass
             manualBypass.add(tid);
+            hasBypass(target); // refresh cache
             playerHiddenState.put(tid, false);
             if (entityHider != null) entityHider.updateFor(target);
             refreshFullView(target, true);
@@ -1386,7 +1427,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             try { currentVer = Double.parseDouble(rawVer.toString()); }
             catch (Exception e) { currentVer = 0.0; }
         }
-        double latestVer = 4.1;
+        double latestVer = 4.2;
 
         if (currentVer < latestVer) {
             getLogger().info("[FPAntiFreeCam] Updating config.yml to version " + latestVer + "…");

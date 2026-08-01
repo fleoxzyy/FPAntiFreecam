@@ -20,6 +20,49 @@ public final class PlatformUtil {
     private static Boolean hasRegionScheduler       = null;
     private static Boolean hasAsyncScheduler        = null;
 
+    private static Object globalRegionScheduler;
+    private static Method globalRegionRun;
+    private static Method globalRegionRunDelayed;
+    private static Method globalRegionRunAtFixedRate;
+
+    private static Object regionScheduler;
+    private static Method regionRun;
+
+    private static Object asyncScheduler;
+    private static Method asyncRunNow;
+
+    private static Method isOwnedByCurrentRegionMethod;
+
+    static {
+        try {
+            globalRegionScheduler = Bukkit.class.getMethod("getGlobalRegionScheduler").invoke(null);
+            if (globalRegionScheduler != null) {
+                Class<?> cls = globalRegionScheduler.getClass();
+                globalRegionRun = cls.getMethod("run", Plugin.class, Consumer.class);
+                globalRegionRunDelayed = cls.getMethod("runDelayed", Plugin.class, Consumer.class, long.class);
+                globalRegionRunAtFixedRate = cls.getMethod("runAtFixedRate", Plugin.class, Consumer.class, long.class, long.class);
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            regionScheduler = Bukkit.class.getMethod("getRegionScheduler").invoke(null);
+            if (regionScheduler != null) {
+                regionRun = regionScheduler.getClass().getMethod("run", Plugin.class, Location.class, Consumer.class);
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            asyncScheduler = Bukkit.class.getMethod("getAsyncScheduler").invoke(null);
+            if (asyncScheduler != null) {
+                asyncRunNow = asyncScheduler.getClass().getMethod("runNow", Plugin.class, Consumer.class);
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            isOwnedByCurrentRegionMethod = Bukkit.class.getMethod("isOwnedByCurrentRegion", Location.class);
+        } catch (Exception ignored) {}
+    }
+
     private PlatformUtil() {}
 
     // ── Platform detection ────────────────────────────────────────────────
@@ -88,11 +131,9 @@ public final class PlatformUtil {
 
     /** Run a task on the next tick (global/main thread). */
     public static void runTask(Plugin plugin, Runnable task) {
-        if (isFolia() && hasGlobalRegionScheduler()) {
+        if (isFolia() && hasGlobalRegionScheduler() && globalRegionScheduler != null && globalRegionRun != null) {
             try {
-                Object scheduler = Bukkit.class.getMethod("getGlobalRegionScheduler").invoke(null);
-                Method run = scheduler.getClass().getMethod("run", Plugin.class, Consumer.class);
-                run.invoke(scheduler, plugin, (Consumer<Object>) st -> task.run());
+                globalRegionRun.invoke(globalRegionScheduler, plugin, (Consumer<Object>) st -> task.run());
                 return;
             } catch (Exception e) {
                 plugin.getLogger().warning("[FPAntiFreeCam] Folia GlobalRegionScheduler failed, falling back: " + e.getMessage());
@@ -103,11 +144,9 @@ public final class PlatformUtil {
 
     /** Run a task at a specific location (Folia: on the correct region thread). */
     public static void runTask(Plugin plugin, Location location, Runnable task) {
-        if (isFolia() && hasRegionScheduler()) {
+        if (isFolia() && hasRegionScheduler() && regionScheduler != null && regionRun != null) {
             try {
-                Object scheduler = Bukkit.class.getMethod("getRegionScheduler").invoke(null);
-                Method run = scheduler.getClass().getMethod("run", Plugin.class, Location.class, Consumer.class);
-                run.invoke(scheduler, plugin, location, (Consumer<Object>) st -> task.run());
+                regionRun.invoke(regionScheduler, plugin, location, (Consumer<Object>) st -> task.run());
                 return;
             } catch (Exception e) {
                 plugin.getLogger().warning("[FPAntiFreeCam] Folia RegionScheduler failed, falling back: " + e.getMessage());
@@ -118,12 +157,9 @@ public final class PlatformUtil {
 
     /** Schedule a delayed task (global/main thread). */
     public static BukkitTask runTaskLater(Plugin plugin, Runnable task, long delayTicks) {
-        if (isFolia() && hasGlobalRegionScheduler()) {
+        if (isFolia() && hasGlobalRegionScheduler() && globalRegionScheduler != null && globalRegionRunDelayed != null) {
             try {
-                Object scheduler = Bukkit.class.getMethod("getGlobalRegionScheduler").invoke(null);
-                Method runDelayed = scheduler.getClass()
-                        .getMethod("runDelayed", Plugin.class, Consumer.class, long.class);
-                Object foliaTask = runDelayed.invoke(scheduler, plugin,
+                Object foliaTask = globalRegionRunDelayed.invoke(globalRegionScheduler, plugin,
                         (Consumer<Object>) st -> task.run(), delayTicks);
                 return new FoliaTaskWrapper(foliaTask);
             } catch (Exception e) {
@@ -135,12 +171,9 @@ public final class PlatformUtil {
 
     /** Schedule a repeating task (global/main thread). */
     public static BukkitTask runTaskTimer(Plugin plugin, Runnable task, long delayTicks, long periodTicks) {
-        if (isFolia() && hasGlobalRegionScheduler()) {
+        if (isFolia() && hasGlobalRegionScheduler() && globalRegionScheduler != null && globalRegionRunAtFixedRate != null) {
             try {
-                Object scheduler = Bukkit.class.getMethod("getGlobalRegionScheduler").invoke(null);
-                Method runAtFixedRate = scheduler.getClass()
-                        .getMethod("runAtFixedRate", Plugin.class, Consumer.class, long.class, long.class);
-                Object foliaTask = runAtFixedRate.invoke(scheduler, plugin,
+                Object foliaTask = globalRegionRunAtFixedRate.invoke(globalRegionScheduler, plugin,
                         (Consumer<Object>) st -> task.run(), delayTicks < 1 ? 1L : delayTicks, periodTicks < 1 ? 1L : periodTicks);
                 return new FoliaTaskWrapper(foliaTask);
             } catch (Exception e) {
@@ -160,11 +193,9 @@ public final class PlatformUtil {
      * which is what this method uses when available.
      */
     public static void runTaskAsync(Plugin plugin, Runnable task) {
-        if (hasAsyncScheduler()) {
+        if (hasAsyncScheduler() && asyncScheduler != null && asyncRunNow != null) {
             try {
-                Object scheduler = Bukkit.class.getMethod("getAsyncScheduler").invoke(null);
-                Method runNow = scheduler.getClass().getMethod("runNow", Plugin.class, Consumer.class);
-                runNow.invoke(scheduler, plugin, (Consumer<Object>) st -> task.run());
+                asyncRunNow.invoke(asyncScheduler, plugin, (Consumer<Object>) st -> task.run());
                 return;
             } catch (Exception e) {
                 plugin.getLogger().warning("[FPAntiFreeCam] AsyncScheduler failed, falling back: " + e.getMessage());
@@ -180,10 +211,9 @@ public final class PlatformUtil {
      * Always returns true on non-Folia servers (single-threaded).
      */
     public static boolean isOwnedByCurrentRegion(Location location) {
-        if (isFolia()) {
+        if (isFolia() && isOwnedByCurrentRegionMethod != null) {
             try {
-                Method m = Bukkit.class.getMethod("isOwnedByCurrentRegion", Location.class);
-                return (Boolean) m.invoke(null, location);
+                return (Boolean) isOwnedByCurrentRegionMethod.invoke(null, location);
             } catch (Exception ignored) {}
         }
         return true;
