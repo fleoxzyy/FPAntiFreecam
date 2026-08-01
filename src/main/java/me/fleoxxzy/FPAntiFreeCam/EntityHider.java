@@ -90,7 +90,12 @@ public final class EntityHider implements Listener {
         int effectiveVoidY = main.getVoidY(entity.getWorld().getName());
         if (entity.getLocation().getY() > effectiveVoidY) return;
 
-        PlatformUtil.runTask(plugin, () -> {
+        // BUGFIX (Folia): entity visibility calls mutate region-owned state and must
+        // run on the region thread that owns the entity's location. The global region
+        // scheduler (no-location overload) does not guarantee that, and can throw the
+        // same "must run on the owning region thread" class of error the teleport fix
+        // addressed. Route through the region-aware overload instead.
+        PlatformUtil.runTask(plugin, entity.getLocation(), () -> {
             if (!entity.isValid()) return;
             for (Player player : Bukkit.getOnlinePlayers()) {
                 if (shouldHideEntityFrom(player, entity)) {
@@ -137,7 +142,9 @@ public final class EntityHider implements Listener {
     // ── Private helpers ───────────────────────────────────────────────────
 
     private void hideUndergroundEntities(Player player) {
-        PlatformUtil.runTask(plugin, () -> {
+        // BUGFIX (Folia): was scheduled on the global region scheduler; hideEntity()
+        // and getNearbyEntities() must run on the region owning the player's location.
+        PlatformUtil.runTask(plugin, player.getLocation(), () -> {
             for (Entity e : getUndergroundNearby(player)) {
                 if (shouldHideEntityFrom(player, e)) hideFrom(player, e);
             }
@@ -150,7 +157,8 @@ public final class EntityHider implements Listener {
      * hidden set). This is much cheaper when deactivating protection.
      */
     private void showHiddenEntities(Player player) {
-        PlatformUtil.runTask(plugin, () -> {
+        // BUGFIX (Folia): same reasoning as hideUndergroundEntities() above.
+        PlatformUtil.runTask(plugin, player.getLocation(), () -> {
             String prefix = player.getUniqueId().toString() + ":";
             List<String> toShow = new ArrayList<>();
             for (String key : hidden) {

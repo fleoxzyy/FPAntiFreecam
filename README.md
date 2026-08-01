@@ -62,7 +62,7 @@ Protect underground bases, caves, and hidden structures from players using **Fre
 # ============================================================
 
 # PLEASE DO NOT CHANGE!!
-config-version: 4.0
+config-version: 4.1
 
 # ── General ──────────────────────────────────────────────────
 settings:

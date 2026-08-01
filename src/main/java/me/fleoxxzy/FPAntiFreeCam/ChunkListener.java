@@ -194,7 +194,9 @@ public final class ChunkListener implements PacketListener {
         // compounds. Even though we replaced the block states with air, a modified
         // client could still parse these compounds and learn chest locations/contents.
         // We remove any tile entity whose Y coordinate is at or below voidY.
-        if (column != null) {
+        // BUGFIX: this was previously unconditional, ignoring protection.pie-chart-protection
+        // entirely. Tile-entity stripping now only runs when the setting is actually enabled.
+        if (plugin.isPieChartProtectionEnabled() && column != null) {
             boolean tileModified = stripTileEntitiesBelow(column, voidY);
             if (tileModified) modified = true;
         }
@@ -440,6 +442,10 @@ public final class ChunkListener implements PacketListener {
      */
     private void handleEntitySpawn(PacketSendEvent event, Player player) {
         plugin.incrementPacketsProcessed();
+        // BUGFIX: this cancellation was previously unconditional, ignoring
+        // protection.pie-chart-protection entirely (same issue as the tile-entity
+        // stripping above). Only cancel spawn packets when the setting is enabled.
+        if (!plugin.isPieChartProtectionEnabled()) return;
         try {
             WrapperPlayServerSpawnEntity wrapper = new WrapperPlayServerSpawnEntity(event);
             if (wrapper.getEntityType() == EntityTypes.PLAYER) return;

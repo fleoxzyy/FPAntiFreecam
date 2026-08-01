@@ -819,12 +819,26 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 if (!player.isOnline()) return;
                 playerHiddenState.put(id, false);
                 internallyTeleporting.add(id);
-                try {
-                    player.teleport(dest);
-                    refreshFullView(player);
-                } finally {
-                    internallyTeleporting.remove(id);
-                }
+                // BUGFIX: Folia forbids the blocking teleport() call from a region-scheduled
+                // task ("Must use teleportAsync while in region threading"). teleportAsync()
+                // is safe on every platform (Spigot/Paper resolve it synchronously), and the
+                // follow-up work is bounced back through PlatformUtil.runTask so it always
+                // runs on the region thread that owns the destination, regardless of which
+                // thread the returned future completes on.
+                player.teleportAsync(dest).whenComplete((success, throwable) ->
+                        PlatformUtil.runTask(this, dest, () -> {
+                            internallyTeleporting.remove(id);
+                            if (throwable != null) {
+                                getLogger().warning("[FPAntiFreeCam] teleportAsync failed for "
+                                        + player.getName() + ": " + throwable.getMessage());
+                                return;
+                            }
+                            if (Boolean.FALSE.equals(success)) {
+                                dbg("teleportAsync reported failure (cancelled?) for " + player.getName());
+                                return;
+                            }
+                            if (player.isOnline()) refreshFullView(player);
+                        }));
             });
         } else {
             event.setCancelled(true);
@@ -834,12 +848,21 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 playerHiddenState.put(id, true);
                 if (entityHider != null) entityHider.updateFor(player);
                 internallyTeleporting.add(id);
-                try {
-                    player.teleport(dest);
-                    refreshFullView(player);
-                } finally {
-                    internallyTeleporting.remove(id);
-                }
+                // BUGFIX: see comment above – use teleportAsync() on Folia-safe path.
+                player.teleportAsync(dest).whenComplete((success, throwable) ->
+                        PlatformUtil.runTask(this, dest, () -> {
+                            internallyTeleporting.remove(id);
+                            if (throwable != null) {
+                                getLogger().warning("[FPAntiFreeCam] teleportAsync failed for "
+                                        + player.getName() + ": " + throwable.getMessage());
+                                return;
+                            }
+                            if (Boolean.FALSE.equals(success)) {
+                                dbg("teleportAsync reported failure (cancelled?) for " + player.getName());
+                                return;
+                            }
+                            if (player.isOnline()) refreshFullView(player);
+                        }));
             });
         }
     }
@@ -1363,7 +1386,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             try { currentVer = Double.parseDouble(rawVer.toString()); }
             catch (Exception e) { currentVer = 0.0; }
         }
-        double latestVer = 4.0;
+        double latestVer = 4.1;
 
         if (currentVer < latestVer) {
             getLogger().info("[FPAntiFreeCam] Updating config.yml to version " + latestVer + "…");

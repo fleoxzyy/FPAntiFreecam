@@ -86,7 +86,11 @@ public final class UpdateChecker implements Listener {
                     plugin.getLogger().warning("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
                     // Notify any admins already online (e.g. after /fpac reload)
-                    Bukkit.getScheduler().runTask(plugin, () -> {
+                    // BUGFIX (Folia): was calling the raw Bukkit.getScheduler().runTask(),
+                    // which Folia's legacy synchronous scheduler rejects with
+                    // UnsupportedOperationException (same failure class as the teleport
+                    // and entity-hider fixes). Routed through PlatformUtil instead.
+                    PlatformUtil.runTask(plugin, () -> {
                         for (Player p : Bukkit.getOnlinePlayers()) {
                             if (p.hasPermission("fpantifreecam.admin")) notifyPlayer(p);
                         }
