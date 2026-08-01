@@ -5,7 +5,7 @@ plugins {
 }
 
 group = 'me.fleoxxzy'
-version = '1.4.7'
+version = '1.4.8'
 
 repositories {
     mavenCentral()
@@ -27,16 +27,15 @@ dependencies {
     // Paper API – 1.19.4 gives us the widest range without breaking newer builds
     compileOnly("io.papermc.paper:paper-api:1.19.4-R0.1-SNAPSHOT")
 
-    // PacketEvents bundled into our jar (no separate plugin required)
-    implementation("com.github.retrooper:packetevents-spigot:2.12.1")
+    // PacketEvents – required as a separate plugin on the server.
+    // Previously bundled (implementation + shadow relocation), but this caused
+    // dual Netty pipeline injection when standalone PE was also installed,
+    // corrupting compressed packets ("invalid bit length repeat").
+    compileOnly("com.github.retrooper:packetevents-spigot:2.12.1")
 }
 
 // ── Shadow (fat-jar) configuration ──────────────────────────────────────────
 shadowJar {
-    // Relocate PacketEvents so it doesn't conflict with servers that also
-    // have the standalone PacketEvents plugin installed.
-    relocate 'com.github.retrooper', 'me.fleoxxzy.fpantifreecam.libs.retrooper'
-    relocate 'io.github.retrooper',  'me.fleoxxzy.fpantifreecam.libs.io.retrooper'
     archiveClassifier.set('')   // output as FPAntiFreeCam-<version>.jar (no "-all")
 }
 

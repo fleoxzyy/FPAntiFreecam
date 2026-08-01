@@ -4,7 +4,6 @@ import com.github.retrooper.packetevents.PacketEvents;
 import com.github.retrooper.packetevents.PacketEventsAPI;
 import com.github.retrooper.packetevents.event.PacketListenerPriority;
 import com.github.retrooper.packetevents.protocol.world.states.WrappedBlockState;
-import io.github.retrooper.packetevents.factory.spigot.SpigotPacketEventsBuilder;
 import org.bukkit.Bukkit;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
@@ -224,18 +223,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     @Override
     public void onLoad() {
         instance = this;
-        getLogger().info("onLoad() – building PacketEvents…");
-        PacketEvents.setAPI(SpigotPacketEventsBuilder.build(this));
-        PacketEventsAPI<?> api = PacketEvents.getAPI();
-        if (api == null) {
-            getLogger().severe("[FPAntiFreeCam] PacketEvents API is null after build – aborting load.");
-            return;
-        }
-        api.getSettings().checkForUpdates(false).bStats(true);
-        api.load();
-        if (!api.isLoaded()) {
-            getLogger().severe("[FPAntiFreeCam] PacketEvents failed to load – plugin will be disabled.");
-        }
+        // PacketEvents is now an external dependency (standalone plugin).
+        // The standalone PE plugin handles setAPI/load/init.
+        // We do NOT build our own API instance here — doing so caused
+        // dual Netty pipeline injection and packet corruption
+        // ("invalid bit length repeat") when both were active.
     }
 
     @Override
@@ -272,7 +264,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         }
 
         api.getEventManager().registerListener(new ChunkListener(this), PacketListenerPriority.NORMAL);
-        api.init();
+        // Do NOT call api.init() — the standalone PacketEvents plugin handles this.
 
         getServer().getPluginManager().registerEvents(this, this);
         registerCommands();
@@ -304,8 +296,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         ChatUtil.printBanner(ChatUtil.shutdownBanner());
         if (entityHider    != null) entityHider.refreshAll();
         if (paperScheduler != null) paperScheduler.shutdown();
-        PacketEventsAPI<?> api = PacketEvents.getAPI();
-        if (api != null && api.isLoaded()) api.terminate();
+        // Do NOT call api.terminate() — the standalone PacketEvents plugin owns the lifecycle.
         playerHiddenState.clear();
         refreshCooldowns.clear();
         raycastDeactivationPending.clear();
