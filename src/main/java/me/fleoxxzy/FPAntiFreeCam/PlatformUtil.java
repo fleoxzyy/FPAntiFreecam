@@ -18,6 +18,7 @@ public final class PlatformUtil {
     private static Boolean isFolia                  = null;
     private static Boolean hasGlobalRegionScheduler = null;
     private static Boolean hasRegionScheduler       = null;
+    private static Boolean hasAsyncScheduler        = null;
 
     private PlatformUtil() {}
 
@@ -57,6 +58,18 @@ public final class PlatformUtil {
             }
         }
         return hasRegionScheduler;
+    }
+
+    public static boolean hasAsyncScheduler() {
+        if (hasAsyncScheduler == null) {
+            try {
+                Bukkit.class.getMethod("getAsyncScheduler");
+                hasAsyncScheduler = true;
+            } catch (NoSuchMethodException e) {
+                hasAsyncScheduler = false;
+            }
+        }
+        return hasAsyncScheduler;
     }
 
     /** Human-readable platform summary for the startup banner. */
@@ -135,6 +148,31 @@ public final class PlatformUtil {
             }
         }
         return Bukkit.getScheduler().runTaskTimer(plugin, task, delayTicks, periodTicks);
+    }
+
+    /**
+     * Run a task off the main/region threads (network I/O, file I/O, etc.).
+     *
+     * BUGFIX (Folia): Folia's legacy BukkitScheduler rejects EVERY method,
+     * including the async ones — Bukkit.getScheduler().runTaskAsynchronously()
+     * throws UnsupportedOperationException just like the sync variants do.
+     * Folia (and modern Paper) expose a dedicated AsyncScheduler for this,
+     * which is what this method uses when available.
+     */
+    public static void runTaskAsync(Plugin plugin, Runnable task) {
+        if (hasAsyncScheduler()) {
+            try {
+                Object scheduler = Bukkit.class.getMethod("getAsyncScheduler").invoke(null);
+                Method runNow = scheduler.getClass().getMethod("runNow", Plugin.class, Consumer.class);
+                runNow.invoke(scheduler, plugin, (Consumer<Object>) st -> task.run());
+                return;
+            } catch (Exception e) {
+                plugin.getLogger().warning("[FPAntiFreeCam] AsyncScheduler failed, falling back: " + e.getMessage());
+            }
+        }
+        // Only safe as a fallback on non-Folia platforms where the legacy
+        // scheduler's async methods still function normally.
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, task);
     }
 
     /**

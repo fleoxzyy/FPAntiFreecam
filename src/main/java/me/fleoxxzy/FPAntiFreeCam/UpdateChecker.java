@@ -37,7 +37,11 @@ public final class UpdateChecker implements Listener {
         outdated      = false;
         latestVersion = null;
 
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+        // BUGFIX (Folia): was Bukkit.getScheduler().runTaskAsynchronously(), which Folia's
+        // legacy scheduler rejects with UnsupportedOperationException just like the sync
+        // methods do (confirmed crash on Folia 26.1.2 at plugin enable). Routed through
+        // PlatformUtil.runTaskAsync(), which uses Folia's dedicated AsyncScheduler.
+        PlatformUtil.runTaskAsync(plugin, () -> {
             try {
                 HttpURLConnection conn = (HttpURLConnection) new URL(MODRINTH_API).openConnection();
                 conn.setRequestMethod("GET");
