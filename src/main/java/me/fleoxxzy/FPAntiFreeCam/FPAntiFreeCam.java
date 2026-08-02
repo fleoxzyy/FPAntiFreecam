@@ -865,7 +865,15 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                                 dbg("teleportAsync reported failure (cancelled?) for " + player.getName());
                                 return;
                             }
-                            if (player.isOnline()) refreshFullView(player);
+                            if (!player.isOnline()) return;
+                            // BUGFIX: entityHider.updateFor() reads the player's CURRENT
+                            // location to decide which entities to hide/show. It used to be
+                            // called before teleportAsync() even started, so it scanned
+                            // entities around the OLD position instead of the destination —
+                            // meaning entities near a teleport target were never touched.
+                            // It also used to be skipped entirely on this (disarm) branch.
+                            if (entityHider != null) entityHider.updateFor(player);
+                            refreshFullView(player);
                         }));
             });
         } else {
@@ -874,7 +882,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             PlatformUtil.runTask(this, dest, () -> {
                 if (!player.isOnline()) return;
                 playerHiddenState.put(id, true);
-                if (entityHider != null) entityHider.updateFor(player);
                 internallyTeleporting.add(id);
                 // BUGFIX: see comment above – use teleportAsync() on Folia-safe path.
                 player.teleportAsync(dest).whenComplete((success, throwable) ->
@@ -889,7 +896,12 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                                 dbg("teleportAsync reported failure (cancelled?) for " + player.getName());
                                 return;
                             }
-                            if (player.isOnline()) refreshFullView(player);
+                            if (!player.isOnline()) return;
+                            // BUGFIX: see comment in the disarm branch above — updateFor()
+                            // must run after the teleport actually lands, not before, or it
+                            // hides entities near the wrong (pre-teleport) location.
+                            if (entityHider != null) entityHider.updateFor(player);
+                            refreshFullView(player);
                         }));
             });
         }
@@ -1089,9 +1101,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         if (currentHidden != targetHidden) {
             playerHiddenState.put(id, targetHidden);
-            if (targetHidden && entityHider != null) {
-                entityHider.updateFor(player);
-            }
+            // BUGFIX: this used to only run when arming (targetHidden == true), so
+            // dismounting a vehicle while descending below protectionY never re-showed
+            // entities EntityHider had hidden — they'd stay hidden until some unrelated
+            // state change happened to trigger updateFor(). Both directions need it.
+            if (entityHider != null) entityHider.updateFor(player);
             PlatformUtil.runTask(this, player.getLocation(), () -> {
                 if (!player.isOnline()) return;
                 if (targetHidden) {

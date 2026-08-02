@@ -90,19 +90,26 @@ public final class EntityHider implements Listener {
         int effectiveVoidY = main.getVoidY(entity.getWorld().getName());
         if (entity.getLocation().getY() > effectiveVoidY) return;
 
-        // BUGFIX (Folia): entity visibility calls mutate region-owned state and must
-        // run on the region thread that owns the entity's location. The global region
-        // scheduler (no-location overload) does not guarantee that, and can throw the
-        // same "must run on the owning region thread" class of error the teleport fix
-        // addressed. Route through the region-aware overload instead.
-        PlatformUtil.runTask(plugin, entity.getLocation(), () -> {
-            if (!entity.isValid()) return;
-            for (Player player : Bukkit.getOnlinePlayers()) {
+        // BUGFIX (Folia): Player#hideEntity() mutates PLAYER-owned tracking state, not
+        // entity-owned state. The previous approach scheduled a single task on the
+        // region that owns the SPAWNED entity's location, then looped over every
+        // online player from there — but those players can be in a completely
+        // different region (or world) than the entity that just spawned. Mutating a
+        // different region's player from the wrong thread is exactly what Folia's
+        // docs call "entirely inappropriate" use of the region scheduler; it throws,
+        // and that exception was being silently swallowed in hideFrom() below, so
+        // entities were never actually hidden with no visible error. Each player's
+        // check is now dispatched on THAT player's own entity scheduler, which is
+        // always correct no matter where the entity is.
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            if (!player.getWorld().equals(entity.getWorld())) continue;
+            PlatformUtil.runForEntity(plugin, player, () -> {
+                if (!entity.isValid() || !player.isOnline()) return;
                 if (shouldHideEntityFrom(player, entity)) {
                     hideFrom(player, entity);
                 }
-            }
-        });
+            });
+        }
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────
@@ -142,9 +149,16 @@ public final class EntityHider implements Listener {
     // ── Private helpers ───────────────────────────────────────────────────
 
     private void hideUndergroundEntities(Player player) {
-        // BUGFIX (Folia): was scheduled on the global region scheduler; hideEntity()
-        // and getNearbyEntities() must run on the region owning the player's location.
-        PlatformUtil.runTask(plugin, player.getLocation(), () -> {
+        // BUGFIX (Folia): this acts on the PLAYER entity (hideEntity() plus a
+        // nearby-entity query centered on the player), so it must go through the
+        // player's own EntityScheduler rather than a location-based RegionScheduler
+        // task. A location snapshot can go stale — the player moves or is mid-
+        // teleport before the task runs — and Folia's region-ownership checks then
+        // reject the call. That exception was being silently swallowed in
+        // hideFrom(), so nothing visibly happened. The entity scheduler always runs
+        // on whatever region currently owns the player, however they got there.
+        PlatformUtil.runForEntity(plugin, player, () -> {
+            if (!player.isOnline()) return;
             for (Entity e : getUndergroundNearby(player)) {
                 if (shouldHideEntityFrom(player, e)) hideFrom(player, e);
             }
@@ -157,8 +171,10 @@ public final class EntityHider implements Listener {
      * hidden set). This is much cheaper when deactivating protection.
      */
     private void showHiddenEntities(Player player) {
-        // BUGFIX (Folia): same reasoning as hideUndergroundEntities() above.
-        PlatformUtil.runTask(plugin, player.getLocation(), () -> {
+        // BUGFIX (Folia): same reasoning as hideUndergroundEntities() above — must
+        // run on the player's own entity scheduler, not a stale-location region task.
+        PlatformUtil.runForEntity(plugin, player, () -> {
+            if (!player.isOnline()) return;
             String prefix = player.getUniqueId().toString() + ":";
             List<String> toShow = new ArrayList<>();
             for (String key : hidden) {
@@ -192,7 +208,10 @@ public final class EntityHider implements Listener {
             player.hideEntity(plugin, entity);
             hidden.add(key);
         } catch (Exception e) {
-            plugin.getLogger().fine("[FPAntiFreeCam] hideEntity failed: " + e.getMessage());
+            // BUGFIX: was logged at .fine() (invisible by default), which is how this
+            // was failing completely silently. Bumped to .warning() so real failures
+            // actually show up in console instead of masquerading as "nothing happened".
+            plugin.getLogger().warning("[FPAntiFreeCam] hideEntity failed: " + e.getMessage());
         }
     }
 
@@ -203,7 +222,7 @@ public final class EntityHider implements Listener {
             player.showEntity(plugin, entity);
             hidden.remove(key);
         } catch (Exception e) {
-            plugin.getLogger().fine("[FPAntiFreeCam] showEntity failed: " + e.getMessage());
+            plugin.getLogger().warning("[FPAntiFreeCam] showEntity failed: " + e.getMessage());
         }
     }
 

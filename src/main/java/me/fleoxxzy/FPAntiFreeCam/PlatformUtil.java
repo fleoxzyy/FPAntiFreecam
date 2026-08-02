@@ -33,6 +33,9 @@ public final class PlatformUtil {
 
     private static Method isOwnedByCurrentRegionMethod;
 
+    private static Method entityGetScheduler;
+    private static Method entitySchedulerRun;
+
     static {
         try {
             globalRegionScheduler = Bukkit.class.getMethod("getGlobalRegionScheduler").invoke(null);
@@ -60,6 +63,12 @@ public final class PlatformUtil {
 
         try {
             isOwnedByCurrentRegionMethod = Bukkit.class.getMethod("isOwnedByCurrentRegion", Location.class);
+        } catch (Exception ignored) {}
+
+        try {
+            entityGetScheduler = Class.forName("org.bukkit.entity.Entity").getMethod("getScheduler");
+            Class<?> entitySchedulerCls = entityGetScheduler.getReturnType();
+            entitySchedulerRun = entitySchedulerCls.getMethod("run", Plugin.class, Consumer.class, Runnable.class);
         } catch (Exception ignored) {}
     }
 
@@ -150,6 +159,34 @@ public final class PlatformUtil {
                 return;
             } catch (Exception e) {
                 plugin.getLogger().warning("[FPAntiFreeCam] Folia RegionScheduler failed, falling back: " + e.getMessage());
+            }
+        }
+        Bukkit.getScheduler().runTask(plugin, task);
+    }
+
+    /**
+     * BUGFIX (Folia): entity-visibility operations (Player#hideEntity/showEntity,
+     * getNearbyEntities centered on a player, etc.) act on a specific ENTITY, not
+     * a fixed point in space, and Paper's own docs explicitly call using the
+     * location-based RegionScheduler for entity operations "entirely inappropriate".
+     * The EntityScheduler always runs on whatever region currently owns the entity —
+     * it "follows" the entity if it moves or teleports between scheduling and
+     * execution — whereas a RegionScheduler task bound to a stale location snapshot
+     * can end up executing on the wrong region thread once the entity has moved,
+     * which Folia rejects. That rejection was being silently swallowed by the
+     * callers here, so entities were never actually hidden with no visible error.
+     * Falls back to the plain Bukkit scheduler on non-Folia platforms.
+     */
+    public static void runForEntity(Plugin plugin, org.bukkit.entity.Entity entity, Runnable task) {
+        if (isFolia() && entityGetScheduler != null && entitySchedulerRun != null) {
+            try {
+                Object scheduler = entityGetScheduler.invoke(entity);
+                if (scheduler != null) {
+                    entitySchedulerRun.invoke(scheduler, plugin, (Consumer<Object>) st -> task.run(), (Runnable) null);
+                    return;
+                }
+            } catch (Exception e) {
+                plugin.getLogger().warning("[FPAntiFreeCam] Folia EntityScheduler failed, falling back: " + e.getMessage());
             }
         }
         Bukkit.getScheduler().runTask(plugin, task);
