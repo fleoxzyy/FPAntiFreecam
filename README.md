@@ -1,11 +1,26 @@
-# 🛡️ FPAntiFreeCam [Folia Compatible!]
-### Anti-FreeCam & Anti-Xray Protection
+![Banner](https://i.imgur.com/VLbEsqp.png)
 
-![Banner](https://cdn.modrinth.com/data/cached_images/5a285dc33930eb8c81443e43cfa23364e645af71.png)
+<div align="center">
 
-Protect underground bases, caves, and hidden structures from players using **FreeCam** or **X-Ray** mods. FPAntiFreeCam intercepts outgoing packets and replaces underground blocks with air. So FreeCam users see nothing but void below the surface.
+[![Paper](https://img.shields.io/badge/Platform-Paper%2FSpigot%2FFolia-blue?style=for-the-badge&logo=papermc&logoColor=white)](https://papermc.io/)
+[![GitHub](https://img.shields.io/badge/Source-GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Fleoxzyy/FPAntiFreeCam)
+[![Discord](https://img.shields.io/badge/Community-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/5XEqzkSwza)
+[![Modrinth](https://img.shields.io/badge/Download-Modrinth-00AF5C?style=for-the-badge&logo=modrinth&logoColor=white)](https://modrinth.com/plugin/fpantifreecam)
+[![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](https://github.com/Fleoxzyy/FPAntiFreeCam/blob/master/LICENSE)
 
-> ⚠️ This plugin does **not** block ore X-ray. It is designed to protect **bases, farms, and hidden structures**.
+</div>
+
+---
+
+Protect underground bases, caves, and hidden structures from players using **FreeCam** or **X-Ray** mods. FPAntiFreeCam intercepts outgoing packets and replaces underground blocks with air so FreeCam users see nothing but void below the surface.
+
+> ⚠️ This plugin does **not** block ore X-ray. It is designed to protect **bases, farms, and hidden structures** underground.
+
+---
+
+## 🔌 Dependencies
+FPAntiFreeCam requires the following plugin to be installed on your server:
+- **[PacketEvents 2.x](https://modrinth.com/plugin/packetevents)** — Required for packet interception & protocol handling.
 
 ---
 
@@ -58,11 +73,11 @@ Protect underground bases, caves, and hidden structures from players using **Fre
 # ============================================================
 #  FPAntiFreeCam  –  Configuration
 #  Anti-FreeCam protection for Spigot / Paper / Folia
-#  1.19 · 1.20 · 1.21 · 26.1+
+#  1.19+ · 1.20+ · 1.21+ · 26.1+
 # ============================================================
 
 # PLEASE DO NOT CHANGE!!
-config-version: 4.1
+config-version: 4.2
 
 # ── General ──────────────────────────────────────────────────
 settings:
@@ -199,22 +214,9 @@ performance:
 
 ---
 
-## ✅ Compatibility
-
-| Platform | Supported |
-|---|---|
-| Paper 1.19 – 26.1.2+ | ✅ |
-| Purpur | ✅ |
-| Spigot | ✅ |
-| Bukkit | ✅ |
-| Folia | ✅ |
-| Geyser / Floodgate | ✅ |
-
----
-
 ## 💬 Support
 
-**Discord:** [Join our Discord Server](https://discord.gg/5XEqzkSwza)
-**GitHub:** [FPAntiFreeCam GitHub](https://github.com/Fleoxzyy/FPAntiFreeCam)
+[![Discord Banner](https://img.shields.io/badge/Join_Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/5XEqzkSwza)
+[![GitHub Banner](https://img.shields.io/badge/GitHub_Repository-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Fleoxzyy/FPAntiFreeCam)
 
 *Secure what players shouldn't see.*
