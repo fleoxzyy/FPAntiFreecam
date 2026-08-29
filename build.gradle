@@ -5,7 +5,7 @@ plugins {
 }
 
 group = 'me.fleoxxzy'
-version = '1.4.9'
+version = '1.5.0'
 
 repositories {
     mavenCentral()
@@ -32,11 +32,15 @@ dependencies {
     // dual Netty pipeline injection when standalone PE was also installed,
     // corrupting compressed packets ("invalid bit length repeat").
     compileOnly("com.github.retrooper:packetevents-spigot:2.12.1")
+
+    // bStats Metrics
+    implementation("org.bstats:bstats-bukkit:3.1.0")
 }
 
 // ── Shadow (fat-jar) configuration ──────────────────────────────────────────
 shadowJar {
     archiveClassifier.set('')   // output as FPAntiFreeCam-<version>.jar (no "-all")
+    relocate 'org.bstats', 'me.fleoxxzy.FPAntiFreeCam.metrics'
 }
 
 // Make 'build' task produce the shadow jar automatically

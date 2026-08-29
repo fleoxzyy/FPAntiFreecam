@@ -26,6 +26,7 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.generator.WorldInfo;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bstats.bukkit.Metrics;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.StringUtil;
 import org.bukkit.util.Vector;
@@ -248,6 +249,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         entityHider    = new EntityHider(this);
         updateChecker  = new UpdateChecker(this);
         getServer().getPluginManager().registerEvents(updateChecker, this);
+
+        // Initialize bStats Metrics (Plugin ID: 33706)
+        int bStatsPluginId = 33706;
+        new Metrics(this, bStatsPluginId);
+        getLogger().info("[FPAntiFreeCam] bStats metrics initialized (Plugin ID: " + bStatsPluginId + ").");
 
         if (FoliaScheduler.shouldUse()) {
             foliaScheduler = new FoliaScheduler(this);

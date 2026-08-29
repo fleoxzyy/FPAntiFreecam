@@ -57,6 +57,7 @@ public final class ChatUtil {
             "",
             "&b&lFPAntiFreeCam &fv" + version,
             "&7Server version: &b" + org.bukkit.Bukkit.getBukkitVersion() + " &7(&b" + platform + "&7)",
+            "&7Metrics: &bbStats &7(ID: &b33706&7)",
             "&fFPAntiFreeCam has been enabled successfully!",
             ""
         };
