@@ -214,6 +214,15 @@ performance:
 
 ---
 
+## 📊 Statistics
+<div align="center">
+  
+[![bStats](https://bstats.org/signatures/bukkit/FPAntiFreecam.svg)](https://bstats.org/plugin/bukkit/FPAntiFreecam/33706)
+
+</div>
+
+---
+
 ## 💬 Support
 
 [![Discord Banner](https://img.shields.io/badge/Join_Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/5XEqzkSwza)
