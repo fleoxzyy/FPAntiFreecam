@@ -46,5 +46,6 @@ messages:
     - "&e/fpac world <list|add|remove> [name]  &7– Manage worlds"
     - "&e/fpac stats     &7– Show runtime statistics"
     - "&e/fpac bypass <player>  &7– Toggle bypass for a player"
+    - "&e/fpac freecamtest <player>  &7– Manually probe a player for Freecam mods"
     - "&e/fpac help      &7– Show this help"
     - "&e/fpreload       &7– Alias for /fpac reload"

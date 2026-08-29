@@ -9,6 +9,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.inventory.PrepareAnvilEvent;
 import org.bukkit.inventory.AnvilInventory;
+import org.bukkit.inventory.InventoryView;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 
@@ -233,8 +234,9 @@ public final class FreecamDetector implements Listener {
         PlatformUtil.runForEntity(plugin, player, () -> {
             if (!player.isOnline()) return;
             try {
-                AnvilInventory anvil = player.openAnvil(null, true);
-                if (anvil == null) return;
+                InventoryView view = player.openAnvil(null, true);
+                if (view == null) return;
+                if (!(view.getTopInventory() instanceof AnvilInventory anvil)) return;
 
                 ItemStack probeItem = new ItemStack(org.bukkit.Material.PAPER);
                 ItemMeta   meta      = probeItem.getItemMeta();
@@ -251,13 +253,14 @@ public final class FreecamDetector implements Listener {
                 }
 
                 PlatformUtil.runTaskLater(plugin, () -> {
-                    if (!player.isOnline()) return;
-                    // Only close the probe GUI itself, not some other GUI the
-                    // player may have opened in the meantime.
-                    if (player.getOpenInventory().getTopInventory() instanceof AnvilInventory) {
-                        player.closeInventory();
-                    }
                     pendingProbes.remove(player.getUniqueId());
+                    if (!player.isOnline()) return;
+                    // Only close the probe GUI itself on the entity's region thread
+                    PlatformUtil.runForEntity(plugin, player, () -> {
+                        if (player.isOnline() && player.getOpenInventory().getTopInventory() instanceof AnvilInventory) {
+                            player.closeInventory();
+                        }
+                    });
                 }, probeTimeoutTicks);
             } catch (Exception e) {
                 plugin.dbg("FreecamDetector probe failed for " + player.getName() + ": " + e.getMessage());
@@ -307,17 +310,20 @@ public final class FreecamDetector implements Listener {
         plugin.getLogger().warning("[FPAntiFreeCam] Freecam detected: " + player.getName()
                 + " (translation key '" + matchedKey + "' resolved client-side)");
 
-        PlatformUtil.runTask(plugin, () -> {
-            if (player.getOpenInventory().getTopInventory() instanceof AnvilInventory) {
+        PlatformUtil.runForEntity(plugin, player, () -> {
+            if (player.isOnline() && player.getOpenInventory().getTopInventory() instanceof AnvilInventory) {
                 player.closeInventory();
             }
+        });
+
+        PlatformUtil.runTask(plugin, () -> {
             for (String rawCmd : detectedCommands) {
                 String cmd = rawCmd
                         .replace("%player%", player.getName())
                         .replace("%uuid%", player.getUniqueId().toString())
                         .replace("%key%", matchedKey);
                 try {
-                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
+                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), ChatUtil.color(cmd));
                 } catch (Exception e) {
                     plugin.getLogger().warning("[FPAntiFreeCam] Failed to run detected-command '"
                             + cmd + "': " + e.getMessage());
