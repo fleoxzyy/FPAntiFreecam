@@ -1,8 +1,10 @@
-![Banner](https://i.imgur.com/VLbEsqp.png)
+![Banner](https://i.imgur.com/5v2PPgO.png)
 
 <div align="center">
 
 [![Paper](https://img.shields.io/badge/Platform-Paper%2FSpigot%2FFolia-blue?style=for-the-badge&logo=papermc&logoColor=white)](https://papermc.io/)
+[![bStats Servers](https://img.shields.io/bstats/servers/33706?style=for-the-badge&logo=apachespark&logoColor=white&label=bStats%20Servers&labelColor=181717&color=00AF5C)](https://bstats.org/plugin/bukkit/FPAntiFreecam/33706)
+[![bStats Players](https://img.shields.io/bstats/players/33706?style=for-the-badge&logo=minecraft&logoColor=white&label=bStats%20Players&labelColor=181717&color=5865F2)](https://bstats.org/plugin/bukkit/FPAntiFreecam/33706)
 [![GitHub](https://img.shields.io/badge/Source-GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Fleoxzyy/FPAntiFreeCam)
 [![Discord](https://img.shields.io/badge/Community-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/5XEqzkSwza)
 [![Modrinth](https://img.shields.io/badge/Download-Modrinth-00AF5C?style=for-the-badge&logo=modrinth&logoColor=white)](https://modrinth.com/plugin/fpantifreecam)
@@ -12,9 +14,7 @@
 
 ---
 
-Protect underground bases, caves, and hidden structures from players using **FreeCam** or **X-Ray** mods. FPAntiFreeCam intercepts outgoing packets and replaces underground blocks with air so FreeCam users see nothing but void below the surface.
-
-> ⚠️ This plugin does **not** block ore X-ray. It is designed to protect **bases, farms, and hidden structures** underground.
+Protect underground bases, caves, and hidden structures from players using **FreeCam** / **X-Ray** / **Block ESP** mods. FPAntiFreeCam intercepts outgoing packets and replaces underground blocks with air so FreeCam users see nothing but void below the surface.
 
 ---
 
