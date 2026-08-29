@@ -28,6 +28,7 @@ FPAntiFreeCam requires the following plugin to be installed on your server:
 
 - 👁️ **Anti-FreeCam / Anti-Xray** — hides all underground blocks via packet manipulation.
 - 📦 **Entity hiding** — conceals mobs, item frames, and farms inside protected zones.
+- 🕵️ **Freecam client detection** — probes for Freecam-mod translation keys via a hidden anvil GUI and runs a configurable command (kick/ban/webhook/etc.) on detection.
 - 🔔 **Update checker** — notifies admins in-game and in console when a new version is available.
 - ⚡ **Async & optimized** — tick-batched chunk refreshes, minimal performance impact.
 - 🌍 **Universal platform support** — Paper, Purpur, Spigot, Bukkit & Folia (multi-threaded region-aware scheduling).
@@ -44,6 +45,7 @@ FPAntiFreeCam requires the following plugin to be installed on your server:
 | `/fpac debug` | Toggle debug logging | `fpantifreecam.admin` |
 | `/fpac world <add\|remove> <world>` | Add/remove a protected world | `fpantifreecam.admin` |
 | `/fpac bypass <player>` | Toggle bypass for a player | `fpantifreecam.admin` |
+| `/fpac freecamtest <player>` | Manually probe a player for Freecam translation keys (testing) | `fpantifreecam.admin` |
 | `/fpac help` | Show command help | `fpantifreecam.admin` |
 | `/fpreload` | Quick config reload shortcut | `fpantifreecam.admin` |
 | `/fpdebug` | Quick debug toggle shortcut | `fpantifreecam.admin` |
@@ -132,7 +134,7 @@ protection:
   # Pie-chart protection: strips tile entities and entity spawns from packets
   # while protection is active. This prevents players from using the F3 pie chart
   # to find bases (chests, mob farms, etc.) through the void.
-  pie-chart-protection: false
+  pie-chart-protection: true
 
   # Absolute Y floor. Players BELOW this value always have protection OFF.
   # Fixes the void-floor bug when digging straight down near void-y level.
@@ -208,6 +210,21 @@ performance:
   limited-area:
     enabled: false
     chunk-radius: 4
+
+# ── Freecam translation-key detection ──────────────────────────
+freecam-detection:
+  enabled: false
+  probe-interval-seconds: 60
+  probe-timeout-ticks: 20
+  detection-cooldown-seconds: 300
+  debug: false
+  translation-keys:
+    - key: "key.freecam.freecam"
+      expected: "Freecam"
+    - key: "gui.freecam.title"
+      expected: "Freecam"
+  detected-commands:
+    - "kick %player% &cFreecam client detected"
 ```
 
 </details>

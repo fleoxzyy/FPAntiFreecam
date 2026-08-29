@@ -5,7 +5,7 @@
 # ============================================================
 
 # PLEASE DO NOT CHANGE!!
-config-version: 4.2
+config-version: 4.3
 
 # ── General ──────────────────────────────────────────────────
 settings:
@@ -60,7 +60,9 @@ protection:
   # Pie-chart protection: strips tile entities and entity spawns from packets
   # while protection is active. This prevents players from using the F3 pie chart
   # to find bases (chests, mob farms, etc.) through the void.
-  pie-chart-protection: false
+  # Default changed to true: this is the actual anti-ESP/anti-xray protection
+  # for chests, signs, spawners and other block entities, not an optional extra.
+  pie-chart-protection: true
 
   # Absolute Y floor. Players BELOW this value always have protection OFF.
   # Fixes the void-floor bug when digging straight down near void-y level.
@@ -136,3 +138,46 @@ performance:
   limited-area:
     enabled: false
     chunk-radius: 4
+
+# ── Freecam translation-key detection ──────────────────────────
+# Detects Freecam-family client mods by briefly opening a hidden anvil probe
+# and checking whether the player's client resolves a mod-specific
+# translation key to its known translated text. A vanilla client with no
+# such key falls back to showing the raw key string; a client with the
+# mod's lang file installed renders the real text instead, and that text
+# is echoed back to the server through the anvil rename field.
+#
+# NOTE: this depends on the client actually sending back the rename-field
+# content, which some client/mod builds only do once the field is edited
+# rather than the instant it's opened. Treat this as a strong heuristic,
+# not an infallible proof — test against real Freecam-mod clients before
+# wiring it to a punishment command you can't undo (e.g. a ban).
+freecam-detection:
+  enabled: false
+
+  # Only players inside protected worlds who are not bypassed get probed.
+  # Seconds between probe attempts per player.
+  probe-interval-seconds: 60
+
+  # Ticks the hidden anvil GUI stays open before being force-closed.
+  probe-timeout-ticks: 20
+
+  # Seconds before a player can be probed/flagged again after a detection.
+  detection-cooldown-seconds: 300
+
+  # Print verbose debug info about each probe attempt to console.
+  debug: false
+
+  # Known Freecam-mod translation keys and their expected translated text.
+  # Add more as you discover them (check the mod's lang/en_us.json).
+  # Comparison is case-insensitive.
+  translation-keys:
+    - key: "key.freecam.freecam"
+      expected: "Freecam"
+    - key: "gui.freecam.title"
+      expected: "Freecam"
+
+  # Command(s) run from console when a player is detected.
+  # Placeholders: %player%, %uuid%, %key%
+  detected-commands:
+    - "kick %player% &cFreecam client detected"

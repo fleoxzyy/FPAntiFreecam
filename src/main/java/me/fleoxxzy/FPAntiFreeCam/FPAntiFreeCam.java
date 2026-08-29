@@ -212,10 +212,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private Object entityHiderCleanupTask;
 
     // Core utilities
-    private PaperScheduler paperScheduler;
-    private BedrockSupport bedrockSupport;
-    private EntityHider    entityHider;
-    private UpdateChecker  updateChecker;
+    private PaperScheduler   paperScheduler;
+    private BedrockSupport   bedrockSupport;
+    private EntityHider      entityHider;
+    private UpdateChecker    updateChecker;
+    private FreecamDetector  freecamDetector;
 
     // ═════════════════════════════════════════════════════════════════════
     //  JavaPlugin lifecycle
@@ -245,9 +246,10 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         loadConfigValues();
 
-        bedrockSupport = new BedrockSupport(this);
-        entityHider    = new EntityHider(this);
-        updateChecker  = new UpdateChecker(this);
+        bedrockSupport  = new BedrockSupport(this);
+        entityHider     = new EntityHider(this);
+        updateChecker   = new UpdateChecker(this);
+        freecamDetector = new FreecamDetector(this);
         getServer().getPluginManager().registerEvents(updateChecker, this);
 
         // Initialize bStats Metrics (Plugin ID: 33706)
@@ -280,6 +282,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         startRaycastTask();
         startActionBarTask();
         startEntityHiderCleanupTask();
+        freecamDetector.start();
 
         if (getConfig().getBoolean("settings.update-checker", true)) updateChecker.check();
 
@@ -300,8 +303,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     @Override
     public void onDisable() {
         ChatUtil.printBanner(ChatUtil.shutdownBanner());
-        if (entityHider    != null) entityHider.refreshAll();
-        if (paperScheduler != null) paperScheduler.shutdown();
+        if (entityHider     != null) entityHider.refreshAll();
+        if (freecamDetector != null) freecamDetector.shutdown();
+        if (paperScheduler  != null) paperScheduler.shutdown();
         // Do NOT call api.terminate() — the standalone PacketEvents plugin owns the lifecycle.
         playerHiddenState.clear();
         refreshCooldowns.clear();
@@ -403,7 +407,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         voidY = cfg.getInt("protection.void-y", 15);
 
-        pieChartProtection = cfg.getBoolean("protection.pie-chart-protection", false);
+        pieChartProtection = cfg.getBoolean("protection.pie-chart-protection", true);
 
         // NEW: per-world voidY overrides
         perWorldVoidY.clear();
@@ -446,7 +450,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         freezeDetectionSeconds = cfg.getInt("anti-cheat.freeze-detection.seconds", 30);
 
         loadLanguageConfig(cfg.getString("settings.language", "en"));
-        if (entityHider != null) entityHider.loadSettings();
+        if (entityHider     != null) entityHider.loadSettings();
+        if (freecamDetector != null) freecamDetector.loadSettings();
 
         // Validate Y thresholds
         if (deepDeactivationY >= protectionY) {
@@ -782,6 +787,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (isWorldProtected(player.getWorld().getName())) {
             handlePlayerInitialState(player, false);
         }
+        if (freecamDetector != null) freecamDetector.scheduleJoinProbe(player);
     }
 
     @EventHandler
@@ -798,6 +804,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (paperScheduler != null) paperScheduler.cleanupPlayer(id);
         if (bedrockSupport  != null) bedrockSupport.cleanupPlayer(id);
         if (entityHider     != null) entityHider.cleanupPlayer(id);
+        if (freecamDetector != null) freecamDetector.cleanupPlayer(id);
         dbg("Cleaned up quit player: " + event.getPlayer().getName());
     }
 
@@ -1150,7 +1157,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (command.getName().equalsIgnoreCase("fpac")) {
             if (args.length == 1) {
                 return StringUtil.copyPartialMatches(args[0],
-                        Arrays.asList("reload", "debug", "world", "stats", "bypass", "help"),
+                        Arrays.asList("reload", "debug", "world", "stats", "bypass", "freecamtest", "help"),
                         new ArrayList<>());
             }
             if (args.length == 2) {
@@ -1158,7 +1165,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                     return StringUtil.copyPartialMatches(args[1],
                             Arrays.asList("list", "add", "remove"), new ArrayList<>());
                 }
-                if (args[0].equalsIgnoreCase("bypass")) {
+                if (args[0].equalsIgnoreCase("bypass") || args[0].equalsIgnoreCase("freecamtest")) {
                     return Bukkit.getOnlinePlayers().stream()
                             .map(Player::getName)
                             .filter(n -> StringUtil.startsWithIgnoreCase(n, args[1]))
@@ -1193,6 +1200,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             case "world"  -> handleWorld(sender, subArgs);
             case "stats"  -> handleStats(sender);
             case "bypass" -> handleBypass(sender, subArgs);
+            case "freecamtest" -> handleFreecamTest(sender, subArgs);
             case "help"   -> handleHelp(sender);
             default -> {
                 ChatUtil.sendError(sender, "Unknown sub-command. Use /fpac help.");
@@ -1206,6 +1214,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             sender.sendMessage(lang("no-permission")); return true;
         }
         cancelBackgroundTasks();
+        if (freecamDetector != null) freecamDetector.stop();
         loadConfigValues();
         initReplacementBlock();
         for (Player p : Bukkit.getOnlinePlayers()) {
@@ -1218,6 +1227,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         startRaycastTask();
         startActionBarTask();
         startEntityHiderCleanupTask();
+        if (freecamDetector != null) freecamDetector.start();
         ChatUtil.sendSuccess(sender, lang("reload-success", String.join(", ", protectedWorlds)));
         return true;
     }
@@ -1354,6 +1364,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 + "s  &7Debug &8: " + (debugMode ? "&aON" : "&7OFF"));
         if (bedrockSupport  != null) ChatUtil.send(sender, " &7Bedrock     &8: &a" + bedrockSupport.statusLine());
         if (entityHider     != null) ChatUtil.send(sender, " &7EntityHider &8: &a" + entityHider.stats());
+        if (freecamDetector != null) ChatUtil.send(sender, " &7FreecamDetect&8: " + (freecamDetector.isEnabled() ? "&aON" : "&7OFF"));
         if (foliaScheduler  != null) ChatUtil.send(sender, " &7Folia Sched &8: &a" + foliaScheduler.stats());
         if (paperScheduler  != null) ChatUtil.send(sender, " &7Paper Sched &8: &a" + paperScheduler.stats());
         ChatUtil.send(sender, sep);
@@ -1399,6 +1410,36 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         return true;
     }
 
+    /**
+     * NEW: /fpac freecamtest <player> — manually fires one translation-key
+     * probe against the target immediately, ignoring the normal probe
+     * interval/cooldown. For testing freecam-detection against a real
+     * client without waiting for the periodic sweep.
+     */
+    private boolean handleFreecamTest(CommandSender sender, String[] args) {
+        if (!sender.hasPermission("fpantifreecam.admin")) {
+            sender.sendMessage(lang("no-permission")); return true;
+        }
+        if (freecamDetector == null) {
+            ChatUtil.sendError(sender, "FreecamDetector is not initialized."); return true;
+        }
+        if (args.length == 0) {
+            ChatUtil.sendError(sender, "Usage: /fpac freecamtest <player>"); return true;
+        }
+        Player target = Bukkit.getPlayer(args[0]);
+        if (target == null) {
+            ChatUtil.sendError(sender, lang("bypass-unknown", args[0])); return true;
+        }
+        String failReason = freecamDetector.manualProbe(target);
+        if (failReason != null) {
+            ChatUtil.sendError(sender, "Could not probe " + target.getName() + ": " + failReason);
+        } else {
+            ChatUtil.sendSuccess(sender, "Probing " + target.getName()
+                    + " for Freecam translation keys — check console (enable freecam-detection.debug for details).");
+        }
+        return true;
+    }
+
     private boolean handleHelp(CommandSender sender) {
         ChatUtil.send(sender, lang("help-header"));
         List<String> lines = langConfig != null
@@ -1411,6 +1452,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                     "&e/fpac world <list|add|remove> [name]  &7– Manage worlds",
                     "&e/fpac stats     &7– Show runtime statistics",
                     "&e/fpac bypass <player>  &7– Toggle bypass for a player",
+                    "&e/fpac freecamtest <player>  &7– Manually probe a player for Freecam mods",
                     "&e/fpac help      &7– Show this help"
             }) { ChatUtil.send(sender, l); }
         } else {
@@ -1438,7 +1480,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             try { currentVer = Double.parseDouble(rawVer.toString()); }
             catch (Exception e) { currentVer = 0.0; }
         }
-        double latestVer = 4.2;
+        double latestVer = 4.3;
 
         if (currentVer < latestVer) {
             getLogger().info("[FPAntiFreeCam] Updating config.yml to version " + latestVer + "…");

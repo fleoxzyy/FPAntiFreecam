@@ -16,7 +16,7 @@ softdepend: [ Geyser-Spigot, floodgate ]
 commands:
   fpac:
     description: Main FPAntiFreeCam command.
-    usage: /fpac <reload|debug|world|stats|bypass|help> [args]
+    usage: /fpac <reload|debug|world|stats|bypass|freecamtest|help> [args]
     permission: fpantifreecam.admin
     aliases: [ fpafc, antifreecam ]
   fpreload:
