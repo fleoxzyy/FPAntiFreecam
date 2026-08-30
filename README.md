@@ -225,6 +225,7 @@ freecam-detection:
       expected: "Freecam"
   detected-commands:
     - "kick %player% &cFreecam client detected"
+    - "broadcast &8[&cFPAntiFreeCam&8] &e%player% &7was kicked for using Freecam (&8%key%&7)"
 ```
 
 </details>

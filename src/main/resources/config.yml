@@ -177,7 +177,15 @@ freecam-detection:
     - key: "gui.freecam.title"
       expected: "Freecam"
 
-  # Command(s) run from console when a player is detected.
+  # Command(s) run from console when a player is detected. All commands
+  # in the list are run in order, so you can chain multiple actions.
   # Placeholders: %player%, %uuid%, %key%
+  # Color codes (&) are supported for commands that echo back to chat/broadcast.
   detected-commands:
     - "kick %player% &cFreecam client detected"
+    - "broadcast &8[&cFPAntiFreeCam&8] &e%player% &7was kicked for using Freecam (&8%key%&7)"
+    # Examples for other setups — uncomment/adapt instead of stacking everything:
+    # - "tempban %player% 1d Freecam client detected"
+    # - "ban %player% Freecam client detected"
+    # - "lp user %player% permission set fpantifreecam.flagged true"
+    # - "discordsrv broadcast #staff-alerts \uD83D\uDEA8 %player% flagged for Freecam (%key%)"
