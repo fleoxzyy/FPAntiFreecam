@@ -25,6 +25,9 @@ import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSp
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -65,7 +68,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *     instead of the global plugin.getVoidY(), so different worlds can have
  *     different underground floor depths.
  */
-public final class ChunkListener implements PacketListener {
+public final class ChunkListener implements PacketListener, Listener {
 
     private final FPAntiFreeCam plugin;
 
@@ -120,6 +123,21 @@ public final class ChunkListener implements PacketListener {
 
     public ChunkListener(FPAntiFreeCam plugin) {
         this.plugin = plugin;
+    }
+
+    /**
+     * BUGFIX: entityYCache previously had no eviction path at all —
+     * removeEntityFromCache()/clearEntityCache() existed but were never
+     * called anywhere, so every spawned mob/item/orb/painting stayed in this
+     * map for the lifetime of the server even after despawning. On a server
+     * with active farms or heavy natural spawning this grew unbounded.
+     * EntityRemoveFromWorldEvent fires for every removal path (death,
+     * despawn, pickup, chunk unload, dimension change, etc.), so hooking it
+     * here keeps the cache trimmed in real time instead of just accumulating.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void onEntityRemove(io.papermc.paper.event.entity.EntityRemoveFromWorldEvent event) {
+        entityYCache.remove(event.getEntity().getEntityId());
     }
 
     // ── PacketEvents entry point ──────────────────────────────────────────

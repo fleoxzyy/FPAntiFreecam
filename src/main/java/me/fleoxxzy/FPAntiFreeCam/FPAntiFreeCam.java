@@ -217,6 +217,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private EntityHider      entityHider;
     private UpdateChecker    updateChecker;
     private FreecamDetector  freecamDetector;
+    private ChunkListener    chunkListener;
 
     // ═════════════════════════════════════════════════════════════════════
     //  JavaPlugin lifecycle
@@ -271,9 +272,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             return;
         }
 
-        api.getEventManager().registerListener(new ChunkListener(this), PacketListenerPriority.NORMAL);
+        chunkListener = new ChunkListener(this);
+        api.getEventManager().registerListener(chunkListener, PacketListenerPriority.NORMAL);
         // Do NOT call api.init() — the standalone PacketEvents plugin handles this.
 
+        getServer().getPluginManager().registerEvents(chunkListener, this);
         getServer().getPluginManager().registerEvents(this, this);
         registerCommands();
 
@@ -306,6 +309,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (entityHider     != null) entityHider.refreshAll();
         if (freecamDetector != null) freecamDetector.shutdown();
         if (paperScheduler  != null) paperScheduler.shutdown();
+        if (chunkListener   != null) chunkListener.clearEntityCache();
         // Do NOT call api.terminate() — the standalone PacketEvents plugin owns the lifecycle.
         playerHiddenState.clear();
         refreshCooldowns.clear();
@@ -1251,6 +1255,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         }
         cancelBackgroundTasks();
         if (freecamDetector != null) freecamDetector.stop();
+        if (chunkListener   != null) chunkListener.clearEntityCache();
         loadConfigValues();
         initReplacementBlock();
         for (Player p : Bukkit.getOnlinePlayers()) {
@@ -1400,6 +1405,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 + "s  &7Debug &8: " + (debugMode ? "&aON" : "&7OFF"));
         if (bedrockSupport  != null) ChatUtil.send(sender, " &7Bedrock     &8: &a" + bedrockSupport.statusLine());
         if (entityHider     != null) ChatUtil.send(sender, " &7EntityHider &8: &a" + entityHider.stats());
+        if (chunkListener   != null) ChatUtil.send(sender, " &7EntityYCache&8: &a" + chunkListener.getEntityCacheSize() + " entries");
         if (freecamDetector != null) ChatUtil.send(sender, " &7FreecamDetect&8: " + (freecamDetector.isEnabled() ? "&aON" : "&7OFF"));
         if (foliaScheduler  != null) ChatUtil.send(sender, " &7Folia Sched &8: &a" + foliaScheduler.stats());
         if (paperScheduler  != null) ChatUtil.send(sender, " &7Paper Sched &8: &a" + paperScheduler.stats());
