@@ -276,7 +276,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         api.getEventManager().registerListener(chunkListener, PacketListenerPriority.NORMAL);
         // Do NOT call api.init() — the standalone PacketEvents plugin handles this.
 
-        getServer().getPluginManager().registerEvents(chunkListener, this);
         getServer().getPluginManager().registerEvents(this, this);
         registerCommands();
 
@@ -690,6 +689,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         entityHiderCleanupTask = PlatformUtil.runTaskTimer(this, () -> {
             if (entityHider != null) entityHider.periodicCleanup();
             if (bedrockSupport != null) bedrockSupport.periodicCleanup();
+            if (chunkListener != null) chunkListener.pruneStaleCache();
         }, 1200L, 1200L); // every 60 s
     }
 
