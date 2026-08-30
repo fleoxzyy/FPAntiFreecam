@@ -67,11 +67,13 @@ public final class FreecamDetector implements Listener {
 
     private final FPAntiFreeCam plugin;
 
-    private boolean enabled              = false;
+    private boolean enabled              = true;
     private boolean debug                = false;
     private int     probeIntervalSeconds = 60;
     private int     probeTimeoutTicks    = 20;
     private int     detectionCooldownSeconds = 300;
+    private boolean alertsEnabled        = true;
+    private String  alertMessage         = "&8[&cFreecam Alert&8] &e%player% &7was flagged for &cFreecam &7(&8%key%&7)";
 
     private final List<ProbeKey>   probeKeys        = new ArrayList<>();
     private final List<String>     detectedCommands = new ArrayList<>();
@@ -96,11 +98,13 @@ public final class FreecamDetector implements Listener {
         var cfg = plugin.getConfig();
         String base = "freecam-detection.";
 
-        enabled                  = cfg.getBoolean(base + "enabled", false);
+        enabled                  = cfg.getBoolean(base + "enabled", true);
         debug                    = cfg.getBoolean(base + "debug", false);
         probeIntervalSeconds     = Math.max(5, cfg.getInt(base + "probe-interval-seconds", 60));
         probeTimeoutTicks        = Math.max(1, cfg.getInt(base + "probe-timeout-ticks", 20));
         detectionCooldownSeconds = Math.max(0, cfg.getInt(base + "detection-cooldown-seconds", 300));
+        alertsEnabled            = cfg.getBoolean(base + "alerts-enabled", true);
+        alertMessage             = cfg.getString(base + "alert-message", alertMessage);
 
         probeKeys.clear();
         List<Map<?, ?>> rawKeys = cfg.getMapList(base + "translation-keys");
@@ -164,10 +168,12 @@ public final class FreecamDetector implements Listener {
     // ═════════════════════════════════════════════════════════════════════
 
     /**
-     * NEW: Schedules a single probe shortly after a player joins, so testing
+     * Schedules a single probe shortly after a player joins, so testing
      * doesn't have to wait for the next probe-interval-seconds sweep. Skips
-     * quietly if the player isn't eligible (wrong world, bypassed, etc.) by
-     * the time it fires — same eligibility rules as the periodic tick().
+     * quietly if the player isn't eligible (bypassed, etc.) by the time it
+     * fires — same eligibility rules as the periodic tick(). Not gated by
+     * worlds.list — freecam detection runs everywhere, independent of which
+     * worlds have void-hiding enabled.
      */
     public void scheduleJoinProbe(Player player) {
         if (!enabled || probeKeys.isEmpty()) return;
@@ -176,8 +182,11 @@ public final class FreecamDetector implements Listener {
         // pop a GUI open on them.
         PlatformUtil.runTaskLater(plugin, () -> {
             if (!player.isOnline()) return;
-            if (!plugin.isWorldProtected(player.getWorld().getName())) return;
-            if (plugin.hasBypass(player)) return;
+            if (plugin.hasBypass(player)) {
+                if (debug) plugin.getLogger().info("[FPAntiFreeCam] Skipped join-probe for "
+                        + player.getName() + ": player has bypass.");
+                return;
+            }
             if (pendingProbes.containsKey(id)) return;
             probe(player);
         }, 60L);
@@ -207,7 +216,6 @@ public final class FreecamDetector implements Listener {
         long now = System.currentTimeMillis();
 
         for (Player player : Bukkit.getOnlinePlayers()) {
-            if (!plugin.isWorldProtected(player.getWorld().getName())) continue;
             if (plugin.hasBypass(player)) continue;
             if (pendingProbes.containsKey(player.getUniqueId())) continue;
 
@@ -255,9 +263,13 @@ public final class FreecamDetector implements Listener {
                 PlatformUtil.runTaskLater(plugin, () -> {
                     pendingProbes.remove(player.getUniqueId());
                     if (!player.isOnline()) return;
-                    // Only close the probe GUI itself on the entity's region thread
+                    // Only close the probe GUI itself on the entity's region thread.
+                    // Clear the slots FIRST — otherwise vanilla returns the unconsumed
+                    // probe item to the player's inventory on close.
                     PlatformUtil.runForEntity(plugin, player, () -> {
-                        if (player.isOnline() && player.getOpenInventory().getTopInventory() instanceof AnvilInventory) {
+                        if (!player.isOnline()) return;
+                        if (player.getOpenInventory().getTopInventory() instanceof AnvilInventory openAnvil) {
+                            openAnvil.clear();
                             player.closeInventory();
                         }
                     });
@@ -311,7 +323,9 @@ public final class FreecamDetector implements Listener {
                 + " (translation key '" + matchedKey + "' resolved client-side)");
 
         PlatformUtil.runForEntity(plugin, player, () -> {
-            if (player.isOnline() && player.getOpenInventory().getTopInventory() instanceof AnvilInventory) {
+            if (!player.isOnline()) return;
+            if (player.getOpenInventory().getTopInventory() instanceof AnvilInventory openAnvil) {
+                openAnvil.clear();
                 player.closeInventory();
             }
         });
@@ -328,6 +342,19 @@ public final class FreecamDetector implements Listener {
                     plugin.getLogger().warning("[FPAntiFreeCam] Failed to run detected-command '"
                             + cmd + "': " + e.getMessage());
                 }
+            }
+
+            if (alertsEnabled) {
+                String alert = ChatUtil.color(alertMessage
+                        .replace("%player%", player.getName())
+                        .replace("%uuid%", player.getUniqueId().toString())
+                        .replace("%key%", matchedKey));
+                for (Player staff : Bukkit.getOnlinePlayers()) {
+                    if (staff.hasPermission("fpantifreecam.alerts")) {
+                        staff.sendMessage(alert);
+                    }
+                }
+                Bukkit.getConsoleSender().sendMessage(alert);
             }
         });
     }

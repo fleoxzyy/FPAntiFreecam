@@ -63,6 +63,7 @@ FPAntiFreeCam requires the following plugin to be installed on your server:
 | `fpantifreecam.debug` | Toggle debug mode | OP |
 | `fpantifreecam.world` | Manage protected worlds | OP |
 | `fpantifreecam.bypass` | Exempt from protection (staff/builders) | ❌ |
+| `fpantifreecam.alerts` | Receive in-game Freecam-detection alerts | OP |
 
 ---
 
@@ -79,7 +80,7 @@ FPAntiFreeCam requires the following plugin to be installed on your server:
 # ============================================================
 
 # PLEASE DO NOT CHANGE!!
-config-version: 4.2
+config-version: 4.4
 
 # ── General ──────────────────────────────────────────────────
 settings:
@@ -213,19 +214,22 @@ performance:
 
 # ── Freecam translation-key detection ──────────────────────────
 freecam-detection:
-  enabled: false
+  enabled: true
   probe-interval-seconds: 60
   probe-timeout-ticks: 20
   detection-cooldown-seconds: 300
   debug: false
   translation-keys:
-    - key: "key.freecam.freecam"
-      expected: "Freecam"
-    - key: "gui.freecam.title"
+    - key: "key.freecam.toggle"
+      expected: "Toggle Freecam"
+    - key: "freecam.config.gui.title"
+      expected: "Freecam Options"
+    - key: "key.category.freecam.controls"
       expected: "Freecam"
   detected-commands:
-    - "kick %player% &cFreecam client detected"
-    - "broadcast &8[&cFPAntiFreeCam&8] &e%player% &7was kicked for using Freecam (&8%key%&7)"
+    - "kick %player% &cFreecam detected"
+  alerts-enabled: true
+  alert-message: "&8[&cFreecam Alert&8] &e%player% &7was flagged for &cFreecam &7(&8%key%&7)"
 ```
 
 </details>

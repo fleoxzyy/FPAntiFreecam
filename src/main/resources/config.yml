@@ -5,7 +5,7 @@
 # ============================================================
 
 # PLEASE DO NOT CHANGE!!
-config-version: 4.3
+config-version: 4.4
 
 # ── General ──────────────────────────────────────────────────
 settings:
@@ -153,7 +153,7 @@ performance:
 # not an infallible proof — test against real Freecam-mod clients before
 # wiring it to a punishment command you can't undo (e.g. a ban).
 freecam-detection:
-  enabled: false
+  enabled: true
 
   # Only players inside protected worlds who are not bypassed get probed.
   # Seconds between probe attempts per player.
@@ -169,12 +169,16 @@ freecam-detection:
   debug: false
 
   # Known Freecam-mod translation keys and their expected translated text.
-  # Add more as you discover them (check the mod's lang/en_us.json).
-  # Comparison is case-insensitive.
+  # Sourced directly from the real freecam mod's assets/freecam/lang/en_us.json
+  # (mod id "freecam", the one by Fereusor/root on Modrinth/CurseForge).
+  # If a different Freecam-family fork uses different keys, check its own
+  # lang file the same way and add pairs here. Comparison is case-insensitive.
   translation-keys:
-    - key: "key.freecam.freecam"
-      expected: "Freecam"
-    - key: "gui.freecam.title"
+    - key: "key.freecam.toggle"
+      expected: "Toggle Freecam"
+    - key: "freecam.config.gui.title"
+      expected: "Freecam Options"
+    - key: "key.category.freecam.controls"
       expected: "Freecam"
 
   # Command(s) run from console when a player is detected. All commands
@@ -182,10 +186,15 @@ freecam-detection:
   # Placeholders: %player%, %uuid%, %key%
   # Color codes (&) are supported for commands that echo back to chat/broadcast.
   detected-commands:
-    - "kick %player% &cFreecam client detected"
-    - "broadcast &8[&cFPAntiFreeCam&8] &e%player% &7was kicked for using Freecam (&8%key%&7)"
+    - "kick %player% &cFreecam detected"
     # Examples for other setups — uncomment/adapt instead of stacking everything:
     # - "tempban %player% 1d Freecam client detected"
     # - "ban %player% Freecam client detected"
     # - "lp user %player% permission set fpantifreecam.flagged true"
     # - "discordsrv broadcast #staff-alerts \uD83D\uDEA8 %player% flagged for Freecam (%key%)"
+
+  # In-game alert sent to any online player with fpantifreecam.alerts, plus
+  # console — similar to Grim/other anticheats' staff alert feed. Fires
+  # alongside detected-commands, not instead of it.
+  alerts-enabled: true
+  alert-message: "&8[&cFreecam Alert&8] &e%player% &7was flagged for &cFreecam &7(&8%key%&7)"

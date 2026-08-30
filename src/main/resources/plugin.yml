@@ -39,6 +39,7 @@ permissions:
       fpantifreecam.debug: true
       fpantifreecam.world: true
       fpantifreecam.bypass: true
+      fpantifreecam.alerts: true
   fpantifreecam.reload:
     description: Allows reloading the configuration.
     default: op
@@ -53,3 +54,8 @@ permissions:
       Players with this permission are exempt from the FreeCam protection
       (they can still see underground blocks). Useful for staff/builders.
     default: false
+  fpantifreecam.alerts:
+    description: >
+      Receive in-game staff alerts when a player is flagged by
+      freecam-detection (similar to an anticheat's alert feed).
+    default: op

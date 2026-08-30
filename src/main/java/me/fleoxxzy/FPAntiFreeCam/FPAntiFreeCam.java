@@ -387,7 +387,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
     private void loadConfigValues() {
         saveDefaultConfig();
-        checkConfigVersion();
+        boolean configWasUpdated = checkConfigVersion();
         reloadConfig();
         FileConfiguration cfg = getConfig();
 
@@ -449,7 +449,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         freezeDetectionEnabled = cfg.getBoolean("anti-cheat.freeze-detection.enabled", false);
         freezeDetectionSeconds = cfg.getInt("anti-cheat.freeze-detection.seconds", 30);
 
-        loadLanguageConfig(cfg.getString("settings.language", "en"));
+        loadLanguageConfig(cfg.getString("settings.language", "en"), configWasUpdated);
         if (entityHider     != null) entityHider.loadSettings();
         if (freecamDetector != null) freecamDetector.loadSettings();
 
@@ -478,18 +478,54 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 + " multiDir=" + raycastMultiDirectional);
     }
 
-    private void loadLanguageConfig(String language) {
+    /**
+     * NEW: mergeNewKeys reuses config-version as the single shared trigger for
+     * BOTH config.yml and lang/*.yml. When checkConfigVersion() bumps the
+     * version, this also copies any message keys added to the packaged lang
+     * file into the live one — same missing-key merge as config.yml gets,
+     * just keyed off the same version bump instead of a separate lang-version.
+     */
+    private void loadLanguageConfig(String language, boolean mergeNewKeys) {
         currentLanguage = language;
         File langDir  = new File(getDataFolder(), "lang");
         File langFile = new File(langDir, language + ".yml");
         if (!langDir.exists()) langDir.mkdirs();
-        if (!langFile.exists()) {
+
+        boolean isNew = !langFile.exists();
+        if (isNew) {
             try { saveResource("lang/" + language + ".yml", false); }
             catch (Exception ignored) {
                 try { saveResource("lang/en.yml", false); } catch (Exception ignored2) {}
             }
         }
+
         langConfig = YamlConfiguration.loadConfiguration(langFile);
+
+        if (mergeNewKeys && !isNew) {
+            InputStream mergeStream = getResource("lang/" + language + ".yml");
+            if (mergeStream == null) mergeStream = getResource("lang/en.yml");
+            if (mergeStream != null) {
+                YamlConfiguration packaged = YamlConfiguration.loadConfiguration(
+                        new InputStreamReader(mergeStream, StandardCharsets.UTF_8));
+                boolean changed = false;
+                for (String key : packaged.getKeys(true)) {
+                    if (!langConfig.contains(key)) {
+                        langConfig.set(key, packaged.get(key));
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    try {
+                        langConfig.save(langFile);
+                        getLogger().info("[FPAntiFreeCam] Updated lang/" + language + ".yml with new message keys.");
+                    } catch (Exception e) {
+                        getLogger().warning("[FPAntiFreeCam] Failed to save updated lang/" + language
+                                + ".yml: " + e.getMessage());
+                    }
+                }
+            }
+        }
+
         InputStream defStream = getResource("lang/" + language + ".yml");
         if (defStream == null) defStream = getResource("lang/en.yml");
         if (defStream != null) {
@@ -1471,7 +1507,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         saveConfig();
     }
 
-    private void checkConfigVersion() {
+    private boolean checkConfigVersion() {
         FileConfiguration cfg = getConfig();
         Object rawVer = cfg.get("config-version", 0);
         double currentVer;
@@ -1480,7 +1516,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             try { currentVer = Double.parseDouble(rawVer.toString()); }
             catch (Exception e) { currentVer = 0.0; }
         }
-        double latestVer = 4.3;
+        double latestVer = 4.4;
 
         if (currentVer < latestVer) {
             getLogger().info("[FPAntiFreeCam] Updating config.yml to version " + latestVer + "…");
@@ -1495,6 +1531,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             cfg.set("config-version", latestVer);
             saveConfig();
             getLogger().info("[FPAntiFreeCam] Config update complete.");
+            return true;
         }
+        return false;
     }
 }
