@@ -140,6 +140,12 @@ public final class PlatformUtil {
 
     /** Run a task on the next tick (global/main thread). */
     public static void runTask(Plugin plugin, Runnable task) {
+        // BUGFIX: Bukkit flips isEnabled() to false BEFORE calling onDisable(),
+        // so any scheduler call made during shutdown (directly or through code
+        // like EntityHider.refreshAll()) throws IllegalPluginAccessException.
+        // Running inline instead of scheduling is behaviorally equivalent here
+        // since onDisable() itself always runs on the main/global thread.
+        if (!plugin.isEnabled()) { task.run(); return; }
         if (isFolia() && hasGlobalRegionScheduler() && globalRegionScheduler != null && globalRegionRun != null) {
             try {
                 globalRegionRun.invoke(globalRegionScheduler, plugin, (Consumer<Object>) st -> task.run());
@@ -153,6 +159,7 @@ public final class PlatformUtil {
 
     /** Run a task at a specific location (Folia: on the correct region thread). */
     public static void runTask(Plugin plugin, Location location, Runnable task) {
+        if (!plugin.isEnabled()) { task.run(); return; }
         if (isFolia() && hasRegionScheduler() && regionScheduler != null && regionRun != null) {
             try {
                 regionRun.invoke(regionScheduler, plugin, location, (Consumer<Object>) st -> task.run());
@@ -178,6 +185,7 @@ public final class PlatformUtil {
      * Falls back to the plain Bukkit scheduler on non-Folia platforms.
      */
     public static void runForEntity(Plugin plugin, org.bukkit.entity.Entity entity, Runnable task) {
+        if (!plugin.isEnabled()) { task.run(); return; }
         if (isFolia() && entityGetScheduler != null && entitySchedulerRun != null) {
             try {
                 Object scheduler = entityGetScheduler.invoke(entity);
@@ -194,6 +202,8 @@ public final class PlatformUtil {
 
     /** Schedule a delayed task (global/main thread). */
     public static BukkitTask runTaskLater(Plugin plugin, Runnable task, long delayTicks) {
+        // See runTask() above for why this guard exists.
+        if (!plugin.isEnabled()) { task.run(); return NO_OP_TASK; }
         if (isFolia() && hasGlobalRegionScheduler() && globalRegionScheduler != null && globalRegionRunDelayed != null) {
             try {
                 Object foliaTask = globalRegionRunDelayed.invoke(globalRegionScheduler, plugin,
@@ -208,6 +218,10 @@ public final class PlatformUtil {
 
     /** Schedule a repeating task (global/main thread). */
     public static BukkitTask runTaskTimer(Plugin plugin, Runnable task, long delayTicks, long periodTicks) {
+        // Starting a NEW repeating task while the plugin is disabling makes no
+        // sense (it would tick zero times before shutdown finishes) — just skip
+        // registration entirely, unlike the run-inline guards above.
+        if (!plugin.isEnabled()) return NO_OP_TASK;
         if (isFolia() && hasGlobalRegionScheduler() && globalRegionScheduler != null && globalRegionRunAtFixedRate != null) {
             try {
                 Object foliaTask = globalRegionRunAtFixedRate.invoke(globalRegionScheduler, plugin,
@@ -257,6 +271,15 @@ public final class PlatformUtil {
     }
 
     // ── Inner: BukkitTask wrapper for Folia ScheduledTask ────────────────
+
+    /** Shared no-op completed task, returned when scheduling is skipped because the plugin is disabling. */
+    private static final BukkitTask NO_OP_TASK = new BukkitTask() {
+        @Override public int getTaskId()   { return -1; }
+        @Override public Plugin getOwner() { return null; }
+        @Override public boolean isSync()  { return true; }
+        @Override public boolean isCancelled() { return true; }
+        @Override public void cancel() {}
+    };
 
     private static class FoliaTaskWrapper implements BukkitTask {
         private final Object foliaTask;
