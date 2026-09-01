@@ -46,6 +46,15 @@ import java.util.concurrent.ThreadLocalRandom;
  * as a strong heuristic to feed into an anticheat pipeline, not
  * infallible proof — verify against real Freecam-mod clients before
  * wiring it to an irreversible punishment.
+ *
+ * <p><b>REMOVED: periodic re-probing.</b> This used to also re-probe every
+ * online player every {@code probe-interval-seconds} on top of the
+ * join-time probe. That was removed entirely (not just disabled) — opening
+ * the probe GUI mid-session hijacks left-click input away from attacking,
+ * which was disruptive during PVP. Detection now happens ONLY once at
+ * join, plus on-demand via /fpac freecamtest. If a player installs Freecam
+ * mid-session after joining without it, they won't be probed again until
+ * their next join — that tradeoff is intentional.
  */
 public final class FreecamDetector implements Listener {
 
@@ -67,23 +76,16 @@ public final class FreecamDetector implements Listener {
 
     private final FPAntiFreeCam plugin;
 
-    private boolean enabled              = true;
-    private boolean debug                = false;
-    private boolean periodicSweepEnabled = false;
-    private int     probeIntervalSeconds = 60;
-    private int     probeTimeoutTicks    = 5;
-    private int     detectionCooldownSeconds = 300;
-    private boolean alertsEnabled        = true;
-    private String  alertMessage         = "&8[&cFreecam Alert&8] &e%player% &7was flagged for &cFreecam &7(&8%key%&7)";
+    private boolean enabled           = true;
+    private boolean debug             = false;
+    private int     probeTimeoutTicks = 5;
+    private boolean alertsEnabled     = true;
+    private String  alertMessage      = "&8[&cFreecam Alert&8] &e%player% &7was flagged for &cFreecam &7(&8%key%&7)";
 
     private final List<ProbeKey>   probeKeys        = new ArrayList<>();
     private final List<String>     detectedCommands = new ArrayList<>();
 
-    private final Map<UUID, PendingProbe> pendingProbes  = new ConcurrentHashMap<>();
-    private final Map<UUID, Long>         lastProbeMs    = new ConcurrentHashMap<>();
-    private final Map<UUID, Long>         lastDetectMs   = new ConcurrentHashMap<>();
-
-    private Object probeTask;
+    private final Map<UUID, PendingProbe> pendingProbes = new ConcurrentHashMap<>();
 
     public FreecamDetector(FPAntiFreeCam plugin) {
         this.plugin = plugin;
@@ -99,14 +101,11 @@ public final class FreecamDetector implements Listener {
         var cfg = plugin.getConfig();
         String base = "freecam-detection.";
 
-        enabled                  = cfg.getBoolean(base + "enabled", true);
-        debug                    = cfg.getBoolean(base + "debug", false);
-        periodicSweepEnabled     = cfg.getBoolean(base + "periodic-sweep-enabled", false);
-        probeIntervalSeconds     = Math.max(5, cfg.getInt(base + "probe-interval-seconds", 60));
-        probeTimeoutTicks        = Math.max(1, cfg.getInt(base + "probe-timeout-ticks", 5));
-        detectionCooldownSeconds = Math.max(0, cfg.getInt(base + "detection-cooldown-seconds", 300));
-        alertsEnabled            = cfg.getBoolean(base + "alerts-enabled", true);
-        alertMessage             = cfg.getString(base + "alert-message", alertMessage);
+        enabled           = cfg.getBoolean(base + "enabled", true);
+        debug             = cfg.getBoolean(base + "debug", false);
+        probeTimeoutTicks = Math.max(1, cfg.getInt(base + "probe-timeout-ticks", 5));
+        alertsEnabled     = cfg.getBoolean(base + "alerts-enabled", true);
+        alertMessage      = cfg.getString(base + "alert-message", alertMessage);
 
         probeKeys.clear();
         List<Map<?, ?>> rawKeys = cfg.getMapList(base + "translation-keys");
@@ -122,7 +121,7 @@ public final class FreecamDetector implements Listener {
 
         if (debug) {
             plugin.getLogger().info("[FPAntiFreeCam] FreecamDetector loaded: enabled=" + enabled
-                    + " keys=" + probeKeys.size() + " interval=" + probeIntervalSeconds + "s");
+                    + " keys=" + probeKeys.size() + " (join-only probing)");
         }
     }
 
@@ -132,57 +131,24 @@ public final class FreecamDetector implements Listener {
     //  Lifecycle
     // ═════════════════════════════════════════════════════════════════════
 
-    public void start() {
-        stop();
-        // BUGFIX/CHANGE: periodic re-probing was interrupting active PVP —
-        // opening any inventory (even briefly) hijacks the client's left-click
-        // input away from attacking. Probing only happens on join now (see
-        // scheduleJoinProbe()), which fires once right at spawn before combat
-        // can be happening. periodic-sweep-enabled exists as an explicit opt
-        // back in for anyone who wants the old always-on behavior anyway.
-        if (!enabled || probeKeys.isEmpty()) return;
-        if (!periodicSweepEnabled) return;
-
-        long periodTicks = probeIntervalSeconds * 20L;
-        probeTask = PlatformUtil.runTaskTimer(plugin, this::tick, periodTicks, periodTicks);
-    }
-
-    public void stop() {
-        if (probeTask == null) return;
-        try {
-            if (probeTask instanceof org.bukkit.scheduler.BukkitTask task) {
-                task.cancel();
-            } else {
-                probeTask.getClass().getMethod("cancel").invoke(probeTask);
-            }
-        } catch (Exception ignored) {}
-        probeTask = null;
-    }
-
     public void cleanupPlayer(UUID id) {
         pendingProbes.remove(id);
-        lastProbeMs.remove(id);
-        lastDetectMs.remove(id);
     }
 
     public void shutdown() {
-        stop();
         pendingProbes.clear();
-        lastProbeMs.clear();
-        lastDetectMs.clear();
     }
 
     // ═════════════════════════════════════════════════════════════════════
-    //  Probe scheduling
+    //  Probing
     // ═════════════════════════════════════════════════════════════════════
 
     /**
-     * Schedules a single probe shortly after a player joins, so testing
-     * doesn't have to wait for the next probe-interval-seconds sweep. Skips
-     * quietly if the player isn't eligible (bypassed, etc.) by the time it
-     * fires — same eligibility rules as the periodic tick(). Not gated by
-     * worlds.list — freecam detection runs everywhere, independent of which
-     * worlds have void-hiding enabled.
+     * Schedules a single probe shortly after a player joins. This is now the
+     * ONLY automatic trigger for a probe — there is no periodic re-check.
+     * Skips quietly if the player isn't eligible (bypassed, Bedrock, etc.)
+     * by the time it fires. Not gated by worlds.list — freecam detection
+     * runs everywhere, independent of which worlds have void-hiding enabled.
      */
     public void scheduleJoinProbe(Player player) {
         if (!enabled || probeKeys.isEmpty()) return;
@@ -207,10 +173,10 @@ public final class FreecamDetector implements Listener {
     }
 
     /**
-     * NEW: Fires a probe immediately, ignoring the interval/cooldown throttle.
-     * Used by /fpac freecamtest for manual testing against a real client.
-     * Still respects "no other GUI currently open" and "no probe already
-     * pending" to avoid clobbering an in-progress check.
+     * Fires a probe immediately. Used by /fpac freecamtest for manual
+     * testing against a real client. Still respects "no other GUI currently
+     * open" and "no probe already pending" to avoid clobbering an
+     * in-progress check.
      *
      * @return a short human-readable reason if the probe could NOT be sent,
      *         or {@code null} if a probe was successfully dispatched.
@@ -226,34 +192,8 @@ public final class FreecamDetector implements Listener {
         return null;
     }
 
-    private void tick() {
-        if (!enabled || probeKeys.isEmpty()) return;
-        long now = System.currentTimeMillis();
-
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            if (plugin.isBedrockPlayer(player)) continue;
-            if (plugin.hasBypass(player)) continue;
-            if (pendingProbes.containsKey(player.getUniqueId())) continue;
-
-            long cooldownUntil = lastDetectMs.getOrDefault(player.getUniqueId(), 0L)
-                    + (detectionCooldownSeconds * 1000L);
-            if (now < cooldownUntil) continue;
-
-            long lastProbe = lastProbeMs.getOrDefault(player.getUniqueId(), 0L);
-            if (now - lastProbe < (probeIntervalSeconds * 1000L)) continue;
-
-            // Skip players who currently have some other GUI open, to avoid
-            // stomping on whatever they're doing.
-            InventoryType openType = player.getOpenInventory().getType();
-            if (openType != InventoryType.CRAFTING) continue;
-
-            probe(player);
-        }
-    }
-
     private void probe(Player player) {
         ProbeKey chosen = probeKeys.get(ThreadLocalRandom.current().nextInt(probeKeys.size()));
-        lastProbeMs.put(player.getUniqueId(), System.currentTimeMillis());
 
         PlatformUtil.runForEntity(plugin, player, () -> {
             if (!player.isOnline()) return;
@@ -331,9 +271,7 @@ public final class FreecamDetector implements Listener {
     // ═════════════════════════════════════════════════════════════════════
 
     private void handleDetection(Player player, String matchedKey) {
-        UUID id = player.getUniqueId();
-        pendingProbes.remove(id);
-        lastDetectMs.put(id, System.currentTimeMillis());
+        pendingProbes.remove(player.getUniqueId());
 
         plugin.getLogger().warning("[FPAntiFreeCam] Freecam detected: " + player.getName()
                 + " (translation key '" + matchedKey + "' resolved client-side)");

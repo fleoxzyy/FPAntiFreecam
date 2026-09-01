@@ -1,13 +1,10 @@
-# ============================================================
-#  FPAntiFreeCam  –  Configuration
-#  Anti-FreeCam protection for Spigot / Paper / Folia
-#  1.19 · 1.20 · 1.21 · 26.1+
-# ============================================================
+# FPAntiFreeCam configuration
+# Anti-FreeCam protection for Spigot, Paper, Folia (1.19 through 26.1+)
 
-# PLEASE DO NOT CHANGE!!
-config-version: 4.5
+# Please do not change this value manually.
+config-version: 4.6
 
-# ── General ──────────────────────────────────────────────────
+# General settings
 settings:
   # Check for updates on startup and notify admins (fpantifreecam.admin permission) on join.
   update-checker: true
@@ -15,184 +12,170 @@ settings:
   # Language file in plugins/FPAntiFreeCam/lang/<language>.yml
   language: "en"
 
-  # Print verbose debug info to console (leave false in production)
+  # Print verbose debug info to console. Leave false in production.
   debug-mode: false
 
   # Seconds a player must wait between FreeCam-state refresh triggers.
-  # Prevents spam-refreshing when rapidly crossing the surface Y level.
+  # Prevents spam refreshing when rapidly crossing the surface Y level.
   refresh-cooldown-seconds: 3
 
-# ── Protected worlds ─────────────────────────────────────────
-# Add every world name that should have underground-hiding active.
-# Tip: avoid nether/end worlds – they can cause visual glitches.
+# Protected worlds
+# Add every world name that should have underground hiding active.
+# Tip: avoid nether/end worlds, they can cause visual glitches.
 worlds:
   list:
     - "world"
     # - "survival"
     # - "resource_world"
 
-# ── FreeCam protection thresholds ────────────────────────────
+# FreeCam protection thresholds
 protection:
-  # Y level at-or-above which hiding is ALWAYS armed.
+  # Y level at or above which hiding is always armed.
   # Players standing at or above this Y cannot see blocks below void-y.
   # Recommended: set to roughly your world's actual surface height.
-  # Example: 64 for a normal overworld, 31 for a flat/custom world.
-  # NOTE: This replaces the old "surface-y" key. Both are supported.
+  # Example: 64 for a normal overworld, 31 for a flat or custom world.
+  # Note: this replaces the old "surface-y" key. Both are still supported.
   protection-y: 64.0
 
-  # Blocks below protection-y before protection turns OFF when descending.
-  # Prevents chunk-refresh spam when jumping at the surface boundary.
+  # Blocks below protection-y before protection turns off when descending.
+  # Prevents chunk refresh spam when jumping at the surface boundary.
   hysteresis-y: 2.0
 
-  # Every block at-or-below this Y is replaced with the void block
+  # Every block at or below this Y is replaced with the void block
   # (replacement.block-type) when protection is active.
-  # Pick the highest Y where your bases/storage actually sit, then add ~5 blocks.
-  # Unsure? Stand on your deepest vault floor in-game and use that Y minus 2.
-  # Default 15 works for typical overworld bases dug to Y~11-20.
+  # Pick the highest Y where your bases or storage actually sit, then add about 5 blocks.
+  # Unsure? Stand on your deepest vault floor in game and use that Y minus 2.
+  # Default 15 works for typical overworld bases dug to Y 11 to 20.
   void-y: 15
 
-  # Optional per-world void-y overrides (world name -> Y level).
+  # Optional per world void-y overrides (world name to Y level).
   # Worlds not listed here use the global void-y above.
   # per-world-void-y:
   #   world_nether: 40
   #   resource_world: 20
 
-  # Pie-chart protection: strips tile entities and entity spawns from packets
-  # while protection is active. This prevents players from using the F3 pie chart
-  # to find bases (chests, mob farms, etc.) through the void.
-  # Default changed to true: this is the actual anti-ESP/anti-xray protection
-  # for chests, signs, spawners and other block entities, not an optional extra.
+  # Pie chart protection strips tile entities and entity spawns from packets
+  # while protection is active. This prevents players from using the F3 pie
+  # chart to find bases (chests, mob farms, etc.) through the void. Default
+  # is true, this is the actual anti ESP / anti xray protection for chests,
+  # signs, spawners and other block entities, not an optional extra.
   pie-chart-protection: true
 
-  # Absolute Y floor. Players BELOW this value always have protection OFF.
-  # Fixes the void-floor bug when digging straight down near void-y level.
-  # Rule: void-y  <  deep-deactivation-y  <  protection-y
+  # Absolute Y floor. Players below this value always have protection off.
+  # Fixes the void floor bug when digging straight down near void-y level.
+  # Rule: void-y < deep-deactivation-y < protection-y
   # Example with defaults: 15 < 20 < 64
   deep-deactivation-y: 20.0
 
   # Raycast zone: players between deep-deactivation-y and protection-y.
-  # Two sub-checks decide whether to arm protection here:
-  #   1. Look-direction: camera pointing upward (freecam angle exploit)
-  #   2. Sky access: open vertical path to protection-y (cave ceiling gap)
+  # Two checks decide whether to arm protection here:
+  #   1) Look direction: camera pointing upward (freecam angle exploit)
+  #   2) Sky access: open vertical path to protection-y (cave ceiling gap)
   raycast:
     enabled: true
-    # Minimum upward look vector (0.0–1.0) to arm protection. ~0.15 ≈ 9° above horizontal.
+    # Minimum upward look vector (0.0 to 1.0) to arm protection. About 0.15 is roughly 9 degrees above horizontal.
     min-upward-angle: 0.15
     # Milliseconds of stability before applying a state change via raycast.
     # Prevents flicker near zone boundaries. 500ms is a good balance.
     deactivation-debounce-ms: 500
-    # Also cast diagonal rays (NE/NW/SE/SW) to catch angled cave openings.
+    # Also cast diagonal rays (NE, NW, SE, SW) to catch angled cave openings.
     multi-directional: true
 
-# ── Replacement block ─────────────────────────────────────────
+# Replacement block
 # Block type sent to the client in place of hidden underground blocks.
 # "air" produces a clean void look (recommended).
 # "stone" can be used to fake a solid floor instead.
 replacement:
   block-type: "air"
 
-# ── Entity hiding ─────────────────────────────────────────────
+# Entity hiding
 entities:
-  # Hide non-player entities that are inside the hidden zone.
-  # Prevents FreeCam from revealing mob farms / storage mobs.
+  # Hide non player entities that are inside the hidden zone.
+  # Prevents FreeCam from revealing mob farms or storage mobs.
   hide-entities: true
 
-# ── Player notifications ────────────────────────────────────────
+# Player notifications
 notifications:
   action-bar:
     # Show a HUD message while protection is active for a player.
     enabled: false
     message-active: "&c☠ FreeCam Protected"
 
-# ── Anti-cheat helpers ────────────────────────────────────────
+# Anti cheat helpers
 anti-cheat:
   freeze-detection:
     # Log a console warning if a protected player above protection-y
-    # has not moved for N seconds (possible position-spoofing FreeCam).
+    # has not moved for N seconds (possible position spoofing FreeCam).
     enabled: false
     seconds: 30
 
-# ── Performance ───────────────────────────────────────────────
+# Performance
 performance:
-  # Folia: enable region-aware chunk scheduling (auto-detected)
+  # Folia: enable region aware chunk scheduling (auto detected).
   folia-optimizations: true
 
-  # Paper/Spigot: max chunks refreshed per server tick
+  # Paper/Spigot: max chunks refreshed per server tick.
   max-chunks-per-tick: 40
 
-  # Instant protection: force a large-radius refresh when a player
-  # first enters the surface-y zone so bases are hidden immediately.
+  # Instant protection forces a large radius refresh when a player first
+  # enters the surface-y zone so bases are hidden immediately.
   instant-protection:
     enabled: true
-    # Chunks radius to refresh when instant protection fires
+    # Chunk radius to refresh when instant protection fires.
     instant-load-radius: 14
-    # Pre-load distance in blocks above surface-y where instant refresh is armed
+    # Pre load distance in blocks above surface-y where instant refresh is armed.
     pre-load-distance: 10
-    # Force re-encode of chunk data immediately (prevents momentary base glimpse)
+    # Force re encode of chunk data immediately (prevents momentary base glimpse).
     force-immediate-refresh: true
 
-  # Limit how far chunk REFRESHES reach when protection toggles.
-  # WARNING: does NOT limit packet masking — but stale client cache outside
-  # this radius may briefly show real blocks until those chunks reload.
-  # Leave disabled unless you need the perf savings and accept that tradeoff.
+  # Limits how far chunk refreshes reach when protection toggles.
+  # Warning: this does not limit packet masking, but stale client cache
+  # outside this radius may briefly show real blocks until those chunks
+  # reload. Leave disabled unless you need the perf savings and accept
+  # that tradeoff.
   limited-area:
     enabled: false
     chunk-radius: 4
 
-# ── Freecam translation-key detection ──────────────────────────
-# Detects Freecam-family client mods by briefly opening a hidden anvil probe
-# and checking whether the player's client resolves a mod-specific
+# Freecam translation key detection
+#
+# Detects Freecam family client mods by briefly opening a hidden anvil
+# probe and checking whether the player's client resolves a mod specific
 # translation key to its known translated text. A vanilla client with no
-# such key falls back to showing the raw key string; a client with the
+# such key falls back to showing the raw key string. A client with the
 # mod's lang file installed renders the real text instead, and that text
 # is echoed back to the server through the anvil rename field.
 #
-# IMPORTANT: this technique inherently requires opening a real GUI, since
-# the client only echoes the rename-field text back through an interactive
+# Important: this technique inherently requires opening a real GUI, since
+# the client only echoes the rename field text back through an interactive
 # element. There is no protocol channel that lets the server read this
-# without popping something on the player's screen — that's a Minecraft
+# without popping something on the player's screen, that's a Minecraft
 # protocol limitation, not something this plugin can route around. Opening
-# any inventory hijacks left-click away from attacking, so probing is
-# limited to join-time by default (probe-timeout-ticks is also kept low so
-# the flash is as short as possible) rather than interrupting active PVP.
+# any inventory hijacks left click away from attacking, which interrupts
+# PVP, so probing only happens once, right at join. There is no periodic
+# recheck anymore. A player who installs Freecam mid session won't be
+# caught until their next join, or via /fpac freecamtest on demand.
 #
-# NOTE: this depends on the client actually sending back the rename-field
+# Note: this depends on the client actually sending back the rename field
 # content, which some client/mod builds only do once the field is edited
 # rather than the instant it's opened. Treat this as a strong heuristic,
-# not an infallible proof — test against real Freecam-mod clients before
+# not infallible proof. Test against real Freecam mod clients before
 # wiring it to a punishment command you can't undo (e.g. a ban).
 freecam-detection:
   enabled: true
 
-  # Whether to ALSO re-probe players periodically while they're online, on
-  # top of the join-time probe. OFF by default — opening the probe GUI
-  # mid-session (e.g. during PVP) hijacks the player's left-click input for
-  # a moment, which is disruptive. Only turn this on if you specifically
-  # want ongoing coverage for players who join before enabling Freecam, and
-  # accept that tradeoff.
-  periodic-sweep-enabled: false
-
-  # Only used if periodic-sweep-enabled is true. Seconds between probe
-  # attempts per player.
-  probe-interval-seconds: 60
-
-  # Ticks the hidden anvil GUI stays open before being force-closed. Kept
-  # low by default (5 ticks = 0.25s) to minimize how long it's visible.
+  # Ticks the hidden anvil GUI stays open before being force closed.
+  # Kept low by default (5 ticks, about 0.25s) to minimize how long it's visible.
   probe-timeout-ticks: 5
-
-  # Seconds before a player can be probed/flagged again after a detection.
-  # Only relevant if periodic-sweep-enabled is true, or if you manually
-  # re-probe via /fpac freecamtest.
-  detection-cooldown-seconds: 300
 
   # Print verbose debug info about each probe attempt to console.
   debug: false
 
-  # Known Freecam-mod translation keys and their expected translated text.
+  # Known Freecam mod translation keys and their expected translated text.
   # Sourced directly from the real freecam mod's assets/freecam/lang/en_us.json
   # (mod id "freecam", the one by Fereusor/root on Modrinth/CurseForge).
-  # If a different Freecam-family fork uses different keys, check its own
-  # lang file the same way and add pairs here. Comparison is case-insensitive.
+  # If a different Freecam family fork uses different keys, check its own
+  # lang file the same way and add pairs here. Comparison is case insensitive.
   translation-keys:
     - key: "key.freecam.toggle"
       expected: "Toggle Freecam"
@@ -201,20 +184,19 @@ freecam-detection:
     - key: "key.category.freecam.controls"
       expected: "Freecam"
 
-  # Command(s) run from console when a player is detected. All commands
-  # in the list are run in order, so you can chain multiple actions.
+  # Command(s) run from console when a player is detected. All commands in
+  # the list run in order, so you can chain multiple actions.
   # Placeholders: %player%, %uuid%, %key%
-  # Color codes (&) are supported for commands that echo back to chat/broadcast.
+  # Color codes (&) are supported for commands that echo back to chat or broadcast.
   detected-commands:
     - "kick %player% &cFreecam detected"
-    # Examples for other setups — uncomment/adapt instead of stacking everything:
+    # Examples for other setups, uncomment or adapt instead of stacking everything:
     # - "tempban %player% 1d Freecam client detected"
-    # - "ban %player% Freecam client detected"
-    # - "lp user %player% permission set fpantifreecam.flagged true"
+    # - "ban %player% Freecam detected"
     # - "discordsrv broadcast #staff-alerts \uD83D\uDEA8 %player% flagged for Freecam (%key%)"
 
-  # In-game alert sent to any online player with fpantifreecam.alerts, plus
-  # console — similar to Grim/other anticheats' staff alert feed. Fires
+  # In game alert sent to any online player with fpantifreecam.alerts, plus
+  # console, similar to Grim or other anticheats' staff alert feed. Fires
   # alongside detected-commands, not instead of it.
   alerts-enabled: true
-  alert-message: "&8[&cFreecam Alert&8] &e%player% &7was flagged for &cFreecam &7(&8%key%&7)"
+  alert-message: "&8[&cFPAntiFreecam&8] &e%player% &7was flagged for &cFreecam &7(&8%key%&7)"

@@ -284,7 +284,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         startRaycastTask();
         startActionBarTask();
         startEntityHiderCleanupTask();
-        freecamDetector.start();
+        // NOTE: freecamDetector no longer has a start() — periodic re-probing was
+        // removed entirely. scheduleJoinProbe() (called from onPlayerJoin) is the
+        // only automatic trigger now, nothing to start here.
 
         if (getConfig().getBoolean("settings.update-checker", true)) updateChecker.check();
 
@@ -1272,7 +1274,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             sender.sendMessage(lang("no-permission")); return true;
         }
         cancelBackgroundTasks();
-        if (freecamDetector != null) freecamDetector.stop();
         if (chunkListener   != null) chunkListener.clearEntityCache();
         loadConfigValues();
         initReplacementBlock();
@@ -1286,7 +1287,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         startRaycastTask();
         startActionBarTask();
         startEntityHiderCleanupTask();
-        if (freecamDetector != null) freecamDetector.start();
         ChatUtil.sendSuccess(sender, lang("reload-success", String.join(", ", protectedWorlds)));
         return true;
     }
@@ -1540,7 +1540,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             try { currentVer = Double.parseDouble(rawVer.toString()); }
             catch (Exception e) { currentVer = 0.0; }
         }
-        double latestVer = 4.5;
+        double latestVer = 4.6;
 
         if (currentVer < latestVer) {
             getLogger().info("[FPAntiFreeCam] Updating config.yml to version " + latestVer + "…");
