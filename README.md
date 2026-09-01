@@ -28,7 +28,7 @@ FPAntiFreeCam requires the following plugin to be installed on your server:
 
 - 👁️ **Anti-FreeCam / Anti-Xray** — hides all underground blocks via packet manipulation.
 - 📦 **Entity hiding** — conceals mobs, item frames, and farms inside protected zones.
-- 🕵️ **Freecam client detection** — probes for Freecam-mod translation keys via a hidden anvil GUI and runs a configurable command (kick/ban/webhook/etc.) on detection.
+- 🕵️ **Freecam client detection** — probes for Freecam-mod translation keys on join and runs a configurable command (kick/ban/webhook/etc.) on detection. Join-only by default so it never interrupts active PVP.
 - 🔔 **Update checker** — notifies admins in-game and in console when a new version is available.
 - ⚡ **Async & optimized** — tick-batched chunk refreshes, minimal performance impact.
 - 🌍 **Universal platform support** — Paper, Purpur, Spigot, Bukkit & Folia (multi-threaded region-aware scheduling).
@@ -80,7 +80,7 @@ FPAntiFreeCam requires the following plugin to be installed on your server:
 # ============================================================
 
 # PLEASE DO NOT CHANGE!!
-config-version: 4.4
+config-version: 4.5
 
 # ── General ──────────────────────────────────────────────────
 settings:
@@ -215,8 +215,9 @@ performance:
 # ── Freecam translation-key detection ──────────────────────────
 freecam-detection:
   enabled: true
+  periodic-sweep-enabled: false
   probe-interval-seconds: 60
-  probe-timeout-ticks: 20
+  probe-timeout-ticks: 5
   detection-cooldown-seconds: 300
   debug: false
   translation-keys:

@@ -202,6 +202,12 @@ public final class EntityHider implements Listener {
     }
 
     private void hideFrom(Player player, Entity entity) {
+        // BUGFIX: Player#hideEntity() internally checks plugin.isEnabled() and
+        // refuses to run at all once the plugin is disabled — this is a hard
+        // Bukkit restriction, not something reschedulable like the scheduler
+        // guard in PlatformUtil. Guard here too as defense-in-depth for any
+        // future call path, on top of removing the call site in onDisable().
+        if (!plugin.isEnabled()) return;
         String key = pairKey(player.getUniqueId(), entity.getUniqueId());
         if (hidden.contains(key)) return;
         try {
@@ -216,6 +222,7 @@ public final class EntityHider implements Listener {
     }
 
     private void showTo(Player player, Entity entity) {
+        if (!plugin.isEnabled()) return;
         String key = pairKey(player.getUniqueId(), entity.getUniqueId());
         if (!hidden.contains(key)) return;
         try {

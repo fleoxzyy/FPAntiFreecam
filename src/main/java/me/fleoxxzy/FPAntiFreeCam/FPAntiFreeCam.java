@@ -305,7 +305,14 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     @Override
     public void onDisable() {
         ChatUtil.printBanner(ChatUtil.shutdownBanner());
-        if (entityHider     != null) entityHider.refreshAll();
+        // BUGFIX: entityHider.refreshAll() used to run here, but it calls
+        // Player#hideEntity()/showEntity() which Bukkit refuses to execute for
+        // ANY disabled plugin (hide or show) — checked internally in
+        // CraftPlayer, not something reschedulable. It always failed with
+        // "Plugin cannot be disabled" once Bukkit flips isEnabled() to false
+        // right before onDisable() runs, so this could never have worked; the
+        // hidden-entity visibility state is per-connection anyway and needs no
+        // explicit cleanup on shutdown.
         if (freecamDetector != null) freecamDetector.shutdown();
         if (paperScheduler  != null) paperScheduler.shutdown();
         if (chunkListener   != null) chunkListener.clearEntityCache();
@@ -356,6 +363,17 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     }
 
     public boolean isPieChartProtectionEnabled() { return pieChartProtection; }
+
+    /**
+     * NEW: Freecam-mod detection is Java-Edition-only by nature (Fabric/Forge
+     * client mods) — Bedrock players connected through Geyser/Floodgate can
+     * never have one installed, and probing them with a Java anvil GUI trick
+     * risks a broken/confusing UI flash since Geyser's anvil translation
+     * wasn't built for this use case. FreecamDetector uses this to skip them.
+     */
+    public boolean isBedrockPlayer(Player player) {
+        return bedrockSupport != null && bedrockSupport.isBedrock(player);
+    }
 
     public WrappedBlockState getReplacementBlock() { return replacementBlockState; }
     public int getReplacementBlockId()             { return replacementBlockId;    }
@@ -1522,7 +1540,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             try { currentVer = Double.parseDouble(rawVer.toString()); }
             catch (Exception e) { currentVer = 0.0; }
         }
-        double latestVer = 4.4;
+        double latestVer = 4.5;
 
         if (currentVer < latestVer) {
             getLogger().info("[FPAntiFreeCam] Updating config.yml to version " + latestVer + "…");

@@ -69,8 +69,9 @@ public final class FreecamDetector implements Listener {
 
     private boolean enabled              = true;
     private boolean debug                = false;
+    private boolean periodicSweepEnabled = false;
     private int     probeIntervalSeconds = 60;
-    private int     probeTimeoutTicks    = 20;
+    private int     probeTimeoutTicks    = 5;
     private int     detectionCooldownSeconds = 300;
     private boolean alertsEnabled        = true;
     private String  alertMessage         = "&8[&cFreecam Alert&8] &e%player% &7was flagged for &cFreecam &7(&8%key%&7)";
@@ -100,8 +101,9 @@ public final class FreecamDetector implements Listener {
 
         enabled                  = cfg.getBoolean(base + "enabled", true);
         debug                    = cfg.getBoolean(base + "debug", false);
+        periodicSweepEnabled     = cfg.getBoolean(base + "periodic-sweep-enabled", false);
         probeIntervalSeconds     = Math.max(5, cfg.getInt(base + "probe-interval-seconds", 60));
-        probeTimeoutTicks        = Math.max(1, cfg.getInt(base + "probe-timeout-ticks", 20));
+        probeTimeoutTicks        = Math.max(1, cfg.getInt(base + "probe-timeout-ticks", 5));
         detectionCooldownSeconds = Math.max(0, cfg.getInt(base + "detection-cooldown-seconds", 300));
         alertsEnabled            = cfg.getBoolean(base + "alerts-enabled", true);
         alertMessage             = cfg.getString(base + "alert-message", alertMessage);
@@ -132,7 +134,14 @@ public final class FreecamDetector implements Listener {
 
     public void start() {
         stop();
+        // BUGFIX/CHANGE: periodic re-probing was interrupting active PVP —
+        // opening any inventory (even briefly) hijacks the client's left-click
+        // input away from attacking. Probing only happens on join now (see
+        // scheduleJoinProbe()), which fires once right at spawn before combat
+        // can be happening. periodic-sweep-enabled exists as an explicit opt
+        // back in for anyone who wants the old always-on behavior anyway.
         if (!enabled || probeKeys.isEmpty()) return;
+        if (!periodicSweepEnabled) return;
 
         long periodTicks = probeIntervalSeconds * 20L;
         probeTask = PlatformUtil.runTaskTimer(plugin, this::tick, periodTicks, periodTicks);
@@ -182,6 +191,11 @@ public final class FreecamDetector implements Listener {
         // pop a GUI open on them.
         PlatformUtil.runTaskLater(plugin, () -> {
             if (!player.isOnline()) return;
+            if (plugin.isBedrockPlayer(player)) {
+                if (debug) plugin.getLogger().info("[FPAntiFreeCam] Skipped join-probe for "
+                        + player.getName() + ": Bedrock player (freecam mods don't exist on Bedrock).");
+                return;
+            }
             if (plugin.hasBypass(player)) {
                 if (debug) plugin.getLogger().info("[FPAntiFreeCam] Skipped join-probe for "
                         + player.getName() + ": player has bypass.");
@@ -204,6 +218,7 @@ public final class FreecamDetector implements Listener {
     public String manualProbe(Player player) {
         if (!enabled) return "freecam-detection.enabled is false in config.yml";
         if (probeKeys.isEmpty()) return "no translation-keys configured";
+        if (plugin.isBedrockPlayer(player)) return "player is on Bedrock — freecam mods don't exist on Bedrock";
         if (pendingProbes.containsKey(player.getUniqueId())) return "a probe is already pending for this player";
         if (player.getOpenInventory().getType() != InventoryType.CRAFTING) return "player already has a GUI open";
 
@@ -216,6 +231,7 @@ public final class FreecamDetector implements Listener {
         long now = System.currentTimeMillis();
 
         for (Player player : Bukkit.getOnlinePlayers()) {
+            if (plugin.isBedrockPlayer(player)) continue;
             if (plugin.hasBypass(player)) continue;
             if (pendingProbes.containsKey(player.getUniqueId())) continue;
 

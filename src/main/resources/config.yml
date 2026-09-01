@@ -5,7 +5,7 @@
 # ============================================================
 
 # PLEASE DO NOT CHANGE!!
-config-version: 4.4
+config-version: 4.5
 
 # ── General ──────────────────────────────────────────────────
 settings:
@@ -147,6 +147,15 @@ performance:
 # mod's lang file installed renders the real text instead, and that text
 # is echoed back to the server through the anvil rename field.
 #
+# IMPORTANT: this technique inherently requires opening a real GUI, since
+# the client only echoes the rename-field text back through an interactive
+# element. There is no protocol channel that lets the server read this
+# without popping something on the player's screen — that's a Minecraft
+# protocol limitation, not something this plugin can route around. Opening
+# any inventory hijacks left-click away from attacking, so probing is
+# limited to join-time by default (probe-timeout-ticks is also kept low so
+# the flash is as short as possible) rather than interrupting active PVP.
+#
 # NOTE: this depends on the client actually sending back the rename-field
 # content, which some client/mod builds only do once the field is edited
 # rather than the instant it's opened. Treat this as a strong heuristic,
@@ -155,14 +164,25 @@ performance:
 freecam-detection:
   enabled: true
 
-  # Only players inside protected worlds who are not bypassed get probed.
-  # Seconds between probe attempts per player.
+  # Whether to ALSO re-probe players periodically while they're online, on
+  # top of the join-time probe. OFF by default — opening the probe GUI
+  # mid-session (e.g. during PVP) hijacks the player's left-click input for
+  # a moment, which is disruptive. Only turn this on if you specifically
+  # want ongoing coverage for players who join before enabling Freecam, and
+  # accept that tradeoff.
+  periodic-sweep-enabled: false
+
+  # Only used if periodic-sweep-enabled is true. Seconds between probe
+  # attempts per player.
   probe-interval-seconds: 60
 
-  # Ticks the hidden anvil GUI stays open before being force-closed.
-  probe-timeout-ticks: 20
+  # Ticks the hidden anvil GUI stays open before being force-closed. Kept
+  # low by default (5 ticks = 0.25s) to minimize how long it's visible.
+  probe-timeout-ticks: 5
 
   # Seconds before a player can be probed/flagged again after a detection.
+  # Only relevant if periodic-sweep-enabled is true, or if you manually
+  # re-probe via /fpac freecamtest.
   detection-cooldown-seconds: 300
 
   # Print verbose debug info about each probe attempt to console.

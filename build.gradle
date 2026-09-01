@@ -68,13 +68,22 @@ tasks {
 }
 
 // ── Java compatibility ──────────────────────────────────────────────────────
-def targetJavaVersion = 21
+// BUGFIX: was 21. Minecraft 1.19–1.20.4 server software runs on Java 17
+// (Java 21 wasn't required until Paper 1.20.5+), so a jar compiled with
+// --release 21 would throw UnsupportedClassVersionError and fail to load
+// entirely on any real 1.19.x/1.20.x server — directly breaking the
+// "1.19 · 1.20 · 1.21 · 26.1+" support this plugin claims. Nothing in this
+// codebase needs Java 21 syntax (no record patterns, no pattern-matching
+// switch, no virtual threads), so targeting 17 loses nothing while making
+// the jar loadable on every JVM this plugin is meant to support — newer
+// JVMs (21+) run Java 17 bytecode natively, the compatibility is one-way.
+def targetJavaVersion = 17
 java {
     def javaVersion = JavaVersion.toVersion(targetJavaVersion)
     sourceCompatibility = javaVersion
     targetCompatibility = javaVersion
-    if (JavaVersion.current() < javaVersion) {
-        toolchain.languageVersion = JavaLanguageVersion.of(targetJavaVersion)
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(targetJavaVersion)
     }
 }
 
