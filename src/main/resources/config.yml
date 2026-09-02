@@ -154,7 +154,7 @@ performance:
 # any inventory hijacks left click away from attacking, which interrupts
 # PVP, so probing only happens once, right at join. There is no periodic
 # recheck anymore. A player who installs Freecam mid session won't be
-# caught until their next join, or via /fpac freecamtest on demand.
+# caught until their next join.
 #
 # Note: this depends on the client actually sending back the rename field
 # content, which some client/mod builds only do once the field is edited

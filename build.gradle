@@ -18,7 +18,7 @@ def getGitHash = { ->
 }
 
 group = 'me.fleoxxzy'
-version = "1.5.1-${getGitHash()}"
+version = "1.5.1"
 
 repositories {
     mavenCentral()

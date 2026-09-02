@@ -1227,7 +1227,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (command.getName().equalsIgnoreCase("fpac")) {
             if (args.length == 1) {
                 return StringUtil.copyPartialMatches(args[0],
-                        Arrays.asList("reload", "debug", "world", "stats", "bypass", "freecamtest", "help"),
+                        Arrays.asList("reload", "debug", "world", "stats", "bypass", "help"),
                         new ArrayList<>());
             }
             if (args.length == 2) {
@@ -1235,7 +1235,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                     return StringUtil.copyPartialMatches(args[1],
                             Arrays.asList("list", "add", "remove"), new ArrayList<>());
                 }
-                if (args[0].equalsIgnoreCase("bypass") || args[0].equalsIgnoreCase("freecamtest")) {
+                if (args[0].equalsIgnoreCase("bypass")) {
                     return Bukkit.getOnlinePlayers().stream()
                             .map(Player::getName)
                             .filter(n -> StringUtil.startsWithIgnoreCase(n, args[1]))
@@ -1270,7 +1270,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             case "world"  -> handleWorld(sender, subArgs);
             case "stats"  -> handleStats(sender);
             case "bypass" -> handleBypass(sender, subArgs);
-            case "freecamtest" -> handleFreecamTest(sender, subArgs);
             case "help"   -> handleHelp(sender);
             default -> {
                 ChatUtil.sendError(sender, "Unknown sub-command. Use /fpac help.");
@@ -1481,35 +1480,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     }
 
     /**
-     * NEW: /fpac freecamtest <player> — manually fires one translation-key
-     * probe against the target immediately, ignoring the normal probe
-     * interval/cooldown. For testing freecam-detection against a real
-     * client without waiting for the periodic sweep.
+     * NOTE: /fpac freecamtest was removed for this release (alpha-only tool for
+     * manually probing a player on demand). The automatic join-probe in
+     * FreecamDetector.scheduleJoinProbe() is unaffected — only the manual
+     * on-demand command was pulled.
      */
-    private boolean handleFreecamTest(CommandSender sender, String[] args) {
-        if (!sender.hasPermission("fpantifreecam.admin")) {
-            sender.sendMessage(lang("no-permission")); return true;
-        }
-        if (freecamDetector == null) {
-            ChatUtil.sendError(sender, "FreecamDetector is not initialized."); return true;
-        }
-        if (args.length == 0) {
-            ChatUtil.sendError(sender, "Usage: /fpac freecamtest <player>"); return true;
-        }
-        Player target = Bukkit.getPlayer(args[0]);
-        if (target == null) {
-            ChatUtil.sendError(sender, lang("bypass-unknown", args[0])); return true;
-        }
-        String failReason = freecamDetector.manualProbe(target);
-        if (failReason != null) {
-            ChatUtil.sendError(sender, "Could not probe " + target.getName() + ": " + failReason);
-        } else {
-            ChatUtil.sendSuccess(sender, "Probing " + target.getName()
-                    + " for Freecam translation keys — check console (enable freecam-detection.debug for details).");
-        }
-        return true;
-    }
-
     private boolean handleHelp(CommandSender sender) {
         ChatUtil.send(sender, lang("help-header"));
         List<String> lines = langConfig != null
@@ -1522,7 +1497,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                     "&e/fpac world <list|add|remove> [name]  &7– Manage worlds",
                     "&e/fpac stats     &7– Show runtime statistics",
                     "&e/fpac bypass <player>  &7– Toggle bypass for a player",
-                    "&e/fpac freecamtest <player>  &7– Manually probe a player for Freecam mods",
                     "&e/fpac help      &7– Show this help"
             }) { ChatUtil.send(sender, l); }
         } else {

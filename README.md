@@ -45,7 +45,6 @@ FPAntiFreeCam requires the following plugin to be installed on your server:
 | `/fpac debug` | Toggle debug logging | `fpantifreecam.admin` |
 | `/fpac world <add\|remove> <world>` | Add/remove a protected world | `fpantifreecam.admin` |
 | `/fpac bypass <player>` | Toggle bypass for a player | `fpantifreecam.admin` |
-| `/fpac freecamtest <player>` | Manually probe a player for Freecam translation keys (testing) | `fpantifreecam.admin` |
 | `/fpac help` | Show command help | `fpantifreecam.admin` |
 | `/fpreload` | Quick config reload shortcut | `fpantifreecam.admin` |
 | `/fpdebug` | Quick debug toggle shortcut | `fpantifreecam.admin` |
@@ -76,7 +75,7 @@ FPAntiFreeCam requires the following plugin to be installed on your server:
 # FPAntiFreeCam configuration
 # Anti-FreeCam protection for Spigot, Paper, Folia (1.19 through 26.1+)
 
-# Please do not change this value manually.
+# Please do not change this manually.
 config-version: 4.6
 
 # General settings
@@ -229,7 +228,7 @@ performance:
 # any inventory hijacks left click away from attacking, which interrupts
 # PVP, so probing only happens once, right at join. There is no periodic
 # recheck anymore. A player who installs Freecam mid session won't be
-# caught until their next join, or via /fpac freecamtest on demand.
+# caught until their next join.
 #
 # Note: this depends on the client actually sending back the rename field
 # content, which some client/mod builds only do once the field is edited
