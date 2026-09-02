@@ -1,7 +1,7 @@
 # FPAntiFreeCam configuration
 # Anti-FreeCam protection for Spigot, Paper, Folia (1.19 through 26.1+)
 
-# Please do not change this value manually.
+# Please do not change this manually.
 config-version: 4.6
 
 # General settings

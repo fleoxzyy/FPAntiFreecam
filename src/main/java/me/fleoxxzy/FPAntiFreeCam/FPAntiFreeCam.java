@@ -619,7 +619,15 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             if (now < expiration) return;
         }
 
-        int radius = Bukkit.getViewDistance();
+        // BUGFIX: Bukkit.getViewDistance() only returns the GLOBAL server.properties
+        // default, not the actual per-world/per-player view distance Paper lets you
+        // configure. If a world's real view distance is set higher than the global
+        // default, this used to under-scope the refresh radius — chunks within the
+        // player's actual render distance but outside the too-small radius never got
+        // their blocks masked, leaving a visible ring of real, unhidden terrain around
+        // the refreshed area. player.getViewDistance() reflects what's actually being
+        // sent to THIS player in THIS world.
+        int radius = player.getViewDistance();
         if (limitedAreaEnabled)    radius = Math.min(radius, limitedAreaRadius);
         if (bedrockSupport != null) radius = bedrockSupport.optimisedRadius(player, radius);
 
@@ -1082,7 +1090,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 return;
             }
 
-            int radius = Bukkit.getViewDistance();
+            // BUGFIX: see the comment in refreshFullView() above — same issue,
+            // same fix. Bukkit.getViewDistance() ignored per-world overrides.
+            int radius = player.getViewDistance();
             if (instantProtection && forceImmediateRefresh
                     && to.getY() <= protectionY + preLoadDistance) {
                 radius = Math.max(radius, instantRadius);
