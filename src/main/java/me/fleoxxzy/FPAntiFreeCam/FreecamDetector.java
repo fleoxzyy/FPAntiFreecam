@@ -6,7 +6,6 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
-import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.inventory.PrepareAnvilEvent;
 import org.bukkit.inventory.AnvilInventory;
 import org.bukkit.inventory.InventoryView;
@@ -52,9 +51,14 @@ import java.util.concurrent.ThreadLocalRandom;
  * join-time probe. That was removed entirely (not just disabled) — opening
  * the probe GUI mid-session hijacks left-click input away from attacking,
  * which was disruptive during PVP. Detection now happens ONLY once at
- * join, plus on-demand via /fpac freecamtest. If a player installs Freecam
- * mid-session after joining without it, they won't be probed again until
- * their next join — that tradeoff is intentional.
+ * join. If a player installs Freecam mid-session after joining without it,
+ * they won't be probed again until their next join — that tradeoff is
+ * intentional.
+ *
+ * <p><b>REMOVED: /fpac freecamtest.</b> The manual on-demand probe command
+ * was removed entirely as dead weight — the automatic join-probe covers
+ * the only case that mattered in practice, and this class no longer
+ * exposes any manual-trigger entry point.
  */
 public final class FreecamDetector implements Listener {
 
@@ -170,26 +174,6 @@ public final class FreecamDetector implements Listener {
             if (pendingProbes.containsKey(id)) return;
             probe(player);
         }, 60L);
-    }
-
-    /**
-     * Fires a probe immediately. Used by /fpac freecamtest for manual
-     * testing against a real client. Still respects "no other GUI currently
-     * open" and "no probe already pending" to avoid clobbering an
-     * in-progress check.
-     *
-     * @return a short human-readable reason if the probe could NOT be sent,
-     *         or {@code null} if a probe was successfully dispatched.
-     */
-    public String manualProbe(Player player) {
-        if (!enabled) return "freecam-detection.enabled is false in config.yml";
-        if (probeKeys.isEmpty()) return "no translation-keys configured";
-        if (plugin.isBedrockPlayer(player)) return "player is on Bedrock — freecam mods don't exist on Bedrock";
-        if (pendingProbes.containsKey(player.getUniqueId())) return "a probe is already pending for this player";
-        if (player.getOpenInventory().getType() != InventoryType.CRAFTING) return "player already has a GUI open";
-
-        probe(player);
-        return null;
     }
 
     private void probe(Player player) {

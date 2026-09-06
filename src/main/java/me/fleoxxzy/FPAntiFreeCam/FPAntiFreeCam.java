@@ -1479,12 +1479,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         return true;
     }
 
-    /**
-     * NOTE: /fpac freecamtest was removed for this release (alpha-only tool for
-     * manually probing a player on demand). The automatic join-probe in
-     * FreecamDetector.scheduleJoinProbe() is unaffected — only the manual
-     * on-demand command was pulled.
-     */
     private boolean handleHelp(CommandSender sender) {
         ChatUtil.send(sender, lang("help-header"));
         List<String> lines = langConfig != null

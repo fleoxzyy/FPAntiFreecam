@@ -7,6 +7,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntitySpawnEvent;
+import org.bukkit.event.vehicle.VehicleCreateEvent;
 import org.bukkit.plugin.Plugin;
 
 import java.util.ArrayList;
@@ -83,8 +84,32 @@ public final class EntityHider implements Listener {
 
     @EventHandler
     public void onEntitySpawn(EntitySpawnEvent event) {
+        // NOTE: EntitySpawnEvent is the FALLBACK spawn event — Bukkit only fires it
+        // for entities that don't have a more specialized spawn event. Entities that
+        // implement the Vehicle interface (Minecart, Boat, and their subtypes like
+        // chest/hopper/TNT minecarts) get VehicleCreateEvent instead when placed by a
+        // player, so this handler never ran for them. See onVehicleCreate() below,
+        // which was the actual bug: minecarts/chest minecarts were never hidden
+        // because their spawn never reached this method at all.
+        handleSpawnedEntity(event.getEntity());
+    }
+
+    /**
+     * BUGFIX: Minecarts (including chest/hopper/TNT/furnace/spawner minecarts) and
+     * boats implement org.bukkit.entity.Vehicle. When a player places one, Bukkit
+     * fires VehicleCreateEvent instead of EntitySpawnEvent — EntitySpawnEvent is
+     * documented as the fallback event used only when no more specific spawn event
+     * applies. Since EntityHider previously only listened for EntitySpawnEvent, any
+     * vehicle placed while a player's protection was already active was never
+     * evaluated for hiding, leaving it visible underground indefinitely.
+     */
+    @EventHandler
+    public void onVehicleCreate(VehicleCreateEvent event) {
+        handleSpawnedEntity(event.getVehicle());
+    }
+
+    private void handleSpawnedEntity(Entity entity) {
         if (!enabled) return;
-        Entity entity = event.getEntity();
         if (entity instanceof Player) return;
 
         int effectiveVoidY = main.getVoidY(entity.getWorld().getName());
