@@ -2,10 +2,12 @@ package me.fleoxxzy.FPAntiFreeCam;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.lang.reflect.Method;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 /**
@@ -76,6 +78,62 @@ public final class PlatformUtil {
 
     // ── Platform detection ────────────────────────────────────────────────
 
+    private static Boolean isPaper = null;
+
+    /** True on Paper and its forks (Purpur, Folia, ...); false on plain Spigot/CraftBukkit. */
+    public static boolean isPaper() {
+        if (isPaper == null) {
+            try {
+                Class.forName("io.papermc.paper.event.player.AsyncChatEvent");
+                isPaper = true;
+            } catch (ClassNotFoundException e) {
+                isPaper = false;
+            }
+        }
+        return isPaper;
+    }
+
+    // ── Paper API with Spigot fallbacks ───────────────────────────────────
+    // Paper-only methods are only called behind isPaper(), so the JVM never
+    // links them on Spigot.
+
+    /** The view distance actually used for this player (Paper), or the server default (Spigot). */
+    public static int viewDistance(Player player) {
+        if (isPaper()) return player.getViewDistance();
+        return Bukkit.getViewDistance();
+    }
+
+    /** Teleports the player; async on Paper/Folia, synchronous on Spigot. */
+    public static CompletableFuture<Boolean> teleport(Player player, Location dest) {
+        if (isPaper()) return player.teleportAsync(dest);
+        try {
+            return CompletableFuture.completedFuture(player.teleport(dest));
+        } catch (Throwable t) {
+            return CompletableFuture.failedFuture(t);
+        }
+    }
+
+    /** Sends an action bar message (already colour-translated legacy text). */
+    @SuppressWarnings("deprecation")
+    public static void sendActionBar(Player player, String legacyMessage) {
+        if (isPaper()) {
+            player.sendActionBar(legacyMessage);
+        } else {
+            player.spigot().sendMessage(net.md_5.bungee.api.ChatMessageType.ACTION_BAR,
+                    net.md_5.bungee.api.chat.TextComponent.fromLegacyText(legacyMessage));
+        }
+    }
+
+    /** Server TPS (1m, 5m, 15m), or null where the platform doesn't expose it. */
+    public static double[] tps() {
+        if (!isPaper()) return null;
+        try {
+            return Bukkit.getServer().getTPS();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     public static boolean isFolia() {
         if (isFolia == null) {
             try {
@@ -127,13 +185,7 @@ public final class PlatformUtil {
     /** Human-readable platform summary for the startup banner. */
     public static String getPlatformName() {
         if (isFolia()) return "Folia";
-        // Detect Paper by checking for Paper-specific API
-        try {
-            Class.forName("io.papermc.paper.event.player.AsyncChatEvent");
-            return "Paper";
-        } catch (ClassNotFoundException e) {
-            return "Spigot";
-        }
+        return isPaper() ? "Paper" : "Spigot";
     }
 
     // ── Task scheduling ───────────────────────────────────────────────────

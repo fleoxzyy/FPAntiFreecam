@@ -44,7 +44,7 @@ dependencies {
     // Previously bundled (implementation + shadow relocation), but this caused
     // dual Netty pipeline injection when standalone PE was also installed,
     // corrupting compressed packets ("invalid bit length repeat").
-    compileOnly("com.github.retrooper:packetevents-spigot:2.12.1")
+    compileOnly("com.github.retrooper:packetevents-spigot:2.11.0")
 
     // bStats Metrics
     implementation("org.bstats:bstats-bukkit:3.1.0")

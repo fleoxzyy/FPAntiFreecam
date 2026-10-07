@@ -326,7 +326,12 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         bedrockSupport  = new BedrockSupport(this);
         entityHider     = new EntityHider(this);
         updateChecker   = new UpdateChecker(this);
-        freecamDetector = new FreecamDetector(this);
+        // Freecam detection needs Paper's anvil + Adventure API; not available on plain Spigot.
+        if (PlatformUtil.isPaper()) {
+            freecamDetector = new FreecamDetector(this);
+        } else {
+            getLogger().info("[FPAntiFreeCam] Freecam mod detection requires Paper and is disabled on Spigot.");
+        }
         smartFillReveal = new SmartFillReveal(this);
         getServer().getPluginManager().registerEvents(updateChecker, this);
 
@@ -800,7 +805,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         // their blocks masked, leaving a visible ring of real, unhidden terrain around
         // the refreshed area. player.getViewDistance() reflects what's actually being
         // sent to THIS player in THIS world.
-        int radius = player.getViewDistance();
+        int radius = PlatformUtil.viewDistance(player);
         if (limitedAreaEnabled)    radius = Math.min(radius, limitedAreaRadius);
         if (bedrockSupport != null) radius = bedrockSupport.optimisedRadius(player, radius);
 
@@ -880,7 +885,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             for (Player p : Bukkit.getOnlinePlayers()) {
                 if (actionBarEnabled && isProtectionActive(p)) {
                     try {
-                        p.sendActionBar(msg);
+                        PlatformUtil.sendActionBar(p, msg);
                     } catch (Exception ignored) {}
                 }
                 if (freezeDetectionEnabled) {
@@ -1287,7 +1292,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 // follow-up work is bounced back through PlatformUtil.runTask so it always
                 // runs on the region thread that owns the destination, regardless of which
                 // thread the returned future completes on.
-                player.teleportAsync(dest).whenComplete((success, throwable) ->
+                PlatformUtil.teleport(player, dest).whenComplete((success, throwable) ->
                         PlatformUtil.runTask(this, dest, () -> {
                             internallyTeleporting.remove(id);
                             if (throwable != null) {
@@ -1319,7 +1324,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 smartFillDisarmedForRelog.remove(id); // naturally reached the surface
                 internallyTeleporting.add(id);
                 // BUGFIX: see comment above – use teleportAsync() on Folia-safe path.
-                player.teleportAsync(dest).whenComplete((success, throwable) ->
+                PlatformUtil.teleport(player, dest).whenComplete((success, throwable) ->
                         PlatformUtil.runTask(this, dest, () -> {
                             internallyTeleporting.remove(id);
                             if (throwable != null) {
@@ -1439,7 +1444,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
             // BUGFIX: see the comment in refreshFullView() above — same issue,
             // same fix. Bukkit.getViewDistance() ignored per-world overrides.
-            int radius = player.getViewDistance();
+            int radius = PlatformUtil.viewDistance(player);
             if (instantProtection && forceImmediateRefresh
                     && to.getY() <= protectionY + preLoadDistance) {
                 radius = Math.max(radius, instantRadius);
@@ -1741,7 +1746,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         String tpsStr;
         try {
-            double[] tps = Bukkit.getServer().getTPS();
+            double[] tps = PlatformUtil.tps();
+            if (tps == null) throw new IllegalStateException("TPS not available");
             double t1 = Math.min(tps[0], 20.0), t5 = Math.min(tps[1], 20.0), t15 = Math.min(tps[2], 20.0);
             tpsStr = String.format("%s%.2f &7/ %s%.2f &7/ %s%.2f &8(1m/5m/15m)",
                     t1  >= 18 ? "&a" : t1  >= 15 ? "&e" : "&c", t1,

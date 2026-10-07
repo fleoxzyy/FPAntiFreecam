@@ -265,7 +265,7 @@ public final class SmartFillReveal {
         }
 
         int maxDist = sightMaxDistanceCap;
-        if (sightFollowRenderDistance) maxDist = Math.min(maxDist, player.getViewDistance() * 16);
+        if (sightFollowRenderDistance) maxDist = Math.min(maxDist, PlatformUtil.viewDistance(player) * 16);
         maxDist = Math.max(maxDist, revealRadius);
 
         double[] dirs = directionsFor(maxDist);

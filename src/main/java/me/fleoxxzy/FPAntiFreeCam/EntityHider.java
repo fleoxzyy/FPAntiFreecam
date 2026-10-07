@@ -273,7 +273,7 @@ public final class EntityHider implements Listener {
         try {
             int viewDist;
             try { viewDist = player.getClientViewDistance(); }
-            catch (Exception e) { viewDist = Bukkit.getViewDistance(); }
+            catch (Throwable t) { viewDist = Bukkit.getViewDistance(); }
 
             double  hRadius = viewDist * 16.0;
             int     effectiveVoidY = main.getVoidY(player.getWorld().getName());
