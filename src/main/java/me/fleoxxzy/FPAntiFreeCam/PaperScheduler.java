@@ -6,6 +6,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.util.Collection;
 import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
@@ -14,22 +15,28 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Paper / Spigot chunk refresh scheduler.
- * Queues chunks on the main thread and drains up to MAX_PER_TICK per tick
+ * Queues chunks on the main thread and drains up to performance.max-chunks-per-tick per tick
  * to spread CPU load without holding up the server.
  */
 public final class PaperScheduler {
 
     private static final long REFRESH_COOLDOWN_MS = 50L;
-    private static final int  MAX_PER_TICK        = 30;
 
     private final Plugin              plugin;
+    private       int                 maxPerTick      = 40;
     private final Map<UUID, Long>     lastRefreshTime = new ConcurrentHashMap<>();
     private final Queue<ChunkTask>    queue           = new ConcurrentLinkedQueue<>();
     private       BukkitTask          drainTask;
 
     public PaperScheduler(Plugin plugin) {
         this.plugin = plugin;
+        loadSettings();
         startDrainTask();
+    }
+
+    public void loadSettings() {
+        maxPerTick = Math.max(1, Math.min(500,
+                plugin.getConfig().getInt("performance.max-chunks-per-tick", 40)));
     }
 
     // ── Public API ────────────────────────────────────────────────────────
@@ -59,6 +66,20 @@ public final class PaperScheduler {
         lastRefreshTime.put(id, now);
     }
 
+    /**
+     * Queues a refresh for specific chunk columns (keys packed as
+     * {@code (cx << 32) | (cz & 0xFFFFFFFFL)}). Not subject to the
+     * per-player refreshChunks cooldown; callers rate-limit themselves.
+     */
+    public void refreshColumns(Player player, Collection<Long> columnKeys) {
+        World world = player.getWorld();
+        if (world == null) return;
+        UUID id = player.getUniqueId();
+        for (long key : columnKeys) {
+            queue.offer(new ChunkTask(world, (int) (key >> 32), (int) key, id, 0));
+        }
+    }
+
     public void cleanupPlayer(UUID id) {
         lastRefreshTime.remove(id);
         queue.removeIf(t -> t.playerId.equals(id));
@@ -86,7 +107,7 @@ public final class PaperScheduler {
 
     private void drain() {
         int processed = 0;
-        while (!queue.isEmpty() && processed < MAX_PER_TICK) {
+        while (!queue.isEmpty() && processed < maxPerTick) {
             ChunkTask t = queue.poll();
             if (t == null) break;
             try {

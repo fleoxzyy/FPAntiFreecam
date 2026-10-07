@@ -37,7 +37,9 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -113,6 +115,21 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private final Set<UUID> manualBypass = ConcurrentHashMap.newKeySet();
 
     /**
+     * BUGFIX: Smart Fill's always-on activation is intentionally decoupled
+     * from playerHiddenState (see isSmartFillActiveFor()'s javadoc) so it can
+     * keep hiding distant caves/bases while a player legitimately mines
+     * nearby - but that meant a player who joined or changed world WHILE
+     * ALREADY UNDERGROUND got camouflage/hard-floor masking applied to their
+     * own surroundings from the very first chunk packet, with nothing able
+     * to disarm it (the raycast/hysteresis system only ever governs the
+     * surface-triggered flat mode, never Smart Fill). Players in this set
+     * have Smart Fill fully disarmed until they naturally reach protectionY
+     * on their own, matching the original request that relogging underground
+     * should show everything normally instead of any masking.
+     */
+    private final Set<UUID> smartFillDisarmedForRelog = ConcurrentHashMap.newKeySet();
+
+    /**
      * PERF: Thread-safe bypass cache for Netty-thread access.
      * Maps player UUID → true if the player should bypass protection.
      * Updated on the main/region thread whenever bypass state could change
@@ -168,6 +185,64 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
      */
     private final Map<String, Integer> perWorldVoidY = new ConcurrentHashMap<>();
 
+    // ── Smart Fill config ────────────────────────────────────────────────
+    private boolean smartFillEnabled        = false;
+    private int     smartFillSampleRadius   = 1;
+    private int     smartFillMaxPaletteSize = 6;
+    private String  smartFillFallbackBlock  = "stone";
+    private WrappedBlockState smartFillFallbackState;
+    private int     smartFillFallbackId;
+
+    /**
+     * NEW: shallow-surface-structure exemption (PvP arenas, crystal holes,
+     * player-built rooms). See config.yml's surface-structures comment for
+     * the full reasoning - short version: an enclosed pocket whose roof is
+     * at/above this Y, and whose floor-to-roof height is at/below
+     * smartFillMaxShallowPocketHeight, is exempted from Smart Fill entirely
+     * (roof, floor, and interior all shown as real), on the theory that a
+     * short enclosed pocket near the surface is far more likely a
+     * player-built room than natural cave/vault.
+     */
+    private int smartFillSurfaceStructureMinY = 30;
+    private int smartFillMaxShallowPocketHeight = 10;
+
+    /**
+     * NEW: when true (default), Smart Fill camouflage runs continuously for
+     * any non-bypassed player in a protected world, completely independent
+     * of playerHiddenState/protectionY/raycast state. This is what keeps
+     * distant caves/bases hidden even while the player is legitimately
+     * mining nearby underground with the surface-triggered "hidden" state
+     * turned off for them personally. When false, Smart Fill only runs
+     * while isProtectionActive() is true, matching the old coupled
+     * behavior from before this existed.
+     */
+    private boolean smartFillAlwaysOn = true;
+
+    /**
+     * NEW: top of the Smart Fill camouflage band. Defaults to protection-y
+     * when not explicitly configured. void-y sits below this band as a
+     * permanent, always-flat-masked floor; everything from just above
+     * void-y up to this ceiling gets adaptive terrain camouflage instead of
+     * either a flat void or being left completely unmasked.
+     */
+    private int smartFillCeilingY;
+
+    /**
+     * NEW: per-player last-checked-chunk tracking so Smart Fill can smoothly
+     * refresh nearby chunks as a player walks toward (or descends into) a
+     * previously camouflaged area, instead of the fake terrain only ever
+     * updating on the next natural chunk reload (i.e. leaving and
+     * re-entering render distance).
+     */
+    private final Map<UUID, Long> smartFillLastChunkKey    = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> smartFillRefreshCooldown = new ConcurrentHashMap<>();
+    private static final long SMART_FILL_REFRESH_COOLDOWN_MS = 1000L;
+    private Object smartFillProximityTask;
+    private Object smartFillSightTask;
+
+    /** Max chunk columns one sight sweep may queue for refresh, so a huge newly visible cavern can't flood the refresh queue. */
+    private static final int SMART_FILL_SIGHT_MAX_REFRESH_COLUMNS = 48;
+
     private Set<String> protectedWorlds  = ConcurrentHashMap.newKeySet();
 
     private boolean limitedAreaEnabled  = false;
@@ -218,6 +293,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private UpdateChecker    updateChecker;
     private FreecamDetector  freecamDetector;
     private ChunkListener    chunkListener;
+    private SmartFillReveal  smartFillReveal;
 
     // ═════════════════════════════════════════════════════════════════════
     //  JavaPlugin lifecycle
@@ -251,6 +327,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         entityHider     = new EntityHider(this);
         updateChecker   = new UpdateChecker(this);
         freecamDetector = new FreecamDetector(this);
+        smartFillReveal = new SmartFillReveal(this);
         getServer().getPluginManager().registerEvents(updateChecker, this);
 
         // Initialize bStats Metrics (Plugin ID: 33706)
@@ -284,6 +361,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         startRaycastTask();
         startActionBarTask();
         startEntityHiderCleanupTask();
+        startSmartFillProximityTask();
+        startSmartFillSightTask();
         // NOTE: freecamDetector no longer has a start() — periodic re-probing was
         // removed entirely. scheduleJoinProbe() (called from onPlayerJoin) is the
         // only automatic trigger now, nothing to start here.
@@ -318,6 +397,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (freecamDetector != null) freecamDetector.shutdown();
         if (paperScheduler  != null) paperScheduler.shutdown();
         if (chunkListener   != null) chunkListener.clearEntityCache();
+        if (smartFillReveal != null) smartFillReveal.clearAll();
         // Do NOT call api.terminate() — the standalone PacketEvents plugin owns the lifecycle.
         playerHiddenState.clear();
         refreshCooldowns.clear();
@@ -327,6 +407,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         bypassCache.clear();
         lastSignificantMoveMs.clear();
         lastSignificantMoveLoc.clear();
+        smartFillLastChunkKey.clear();
+        smartFillRefreshCooldown.clear();
+        smartFillDisarmedForRelog.clear();
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -364,6 +447,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         return active;
     }
 
+    public double getProtectionY() { return protectionY; }
+
     public boolean isPieChartProtectionEnabled() { return pieChartProtection; }
 
     /**
@@ -393,6 +478,33 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public int getVoidY(String worldName) {
         if (worldName == null || worldName.isEmpty()) return voidY;
         return perWorldVoidY.getOrDefault(worldName, voidY);
+    }
+
+    // ── Smart Fill accessors ──────────────────────────────────────────────
+    public boolean isSmartFillEnabled()             { return smartFillEnabled; }
+    public int     getSmartFillSampleRadius()       { return smartFillSampleRadius; }
+    public int     getSmartFillMaxPaletteSize()     { return smartFillMaxPaletteSize; }
+    public WrappedBlockState getSmartFillFallback()  { return smartFillFallbackState != null ? smartFillFallbackState : replacementBlockState; }
+    public int     getSmartFillFallbackId()         { return smartFillFallbackId; }
+    public SmartFillReveal getSmartFillReveal()     { return smartFillReveal; }
+    public int     getSmartFillCeilingY()           { return smartFillCeilingY; }
+    public boolean isSmartFillAlwaysOn()            { return smartFillAlwaysOn; }
+    public int     getSmartFillSurfaceStructureMinY()    { return smartFillSurfaceStructureMinY; }
+    public int     getSmartFillMaxShallowPocketHeight()  { return smartFillMaxShallowPocketHeight; }
+
+    /**
+     * NEW: thread-safe (Netty IO safe) check for whether Smart Fill's
+     * continuous camouflage should run for this player right now. Unlike
+     * isProtectionActive(), this does NOT depend on playerHiddenState by
+     * default — see smartFillAlwaysOn's javadoc for why.
+     */
+    public boolean isSmartFillActiveFor(Player player) {
+        if (!smartFillEnabled || player == null) return false;
+        if (!isWorldProtected(player.getWorld().getName())) return false;
+        if (Boolean.TRUE.equals(bypassCache.get(player.getUniqueId()))) return false;
+        if (smartFillDisarmedForRelog.contains(player.getUniqueId())) return false;
+        if (smartFillAlwaysOn) return true;
+        return isProtectionActive(player);
     }
 
     public void dbg(String message) {
@@ -444,6 +556,51 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         String rawBlock = cfg.getString("replacement.block-type", "air");
         replacementBlockType = rawBlock.startsWith("minecraft:") ? rawBlock : "minecraft:" + rawBlock;
 
+        // Smart Fill
+        smartFillEnabled = cfg.getBoolean("replacement.smart-fill.enabled", false);
+        smartFillSampleRadius = Math.max(0, Math.min(4,
+                cfg.getInt("replacement.smart-fill.sample-radius-sections", 1)));
+        smartFillMaxPaletteSize = Math.max(2, Math.min(16,
+                cfg.getInt("replacement.smart-fill.max-palette-size", 6)));
+        smartFillFallbackBlock = cfg.getString("replacement.smart-fill.fallback-block", "stone");
+        String fullFallback = smartFillFallbackBlock.startsWith("minecraft:")
+                ? smartFillFallbackBlock : "minecraft:" + smartFillFallbackBlock;
+        try {
+            smartFillFallbackState = WrappedBlockState.getByString(fullFallback);
+            smartFillFallbackId = smartFillFallbackState != null
+                    ? smartFillFallbackState.getGlobalId() : 0;
+        } catch (Exception e) {
+            smartFillFallbackState = null;
+            smartFillFallbackId = 0;
+        }
+
+        // NEW: continuous mode + camouflage ceiling
+        smartFillAlwaysOn = cfg.getBoolean("replacement.smart-fill.always-on", true);
+        int defaultCeiling = (int) Math.round(protectionY);
+        smartFillCeilingY = cfg.contains("replacement.smart-fill.ceiling-y")
+                ? cfg.getInt("replacement.smart-fill.ceiling-y", defaultCeiling)
+                : defaultCeiling;
+        if (smartFillCeilingY <= voidY) {
+            int clamped = voidY + 16;
+            getLogger().warning("[FPAntiFreeCam] smart-fill ceiling-y (" + smartFillCeilingY
+                    + ") must be > void-y (" + voidY + "). Clamping to " + clamped);
+            smartFillCeilingY = clamped;
+        }
+
+        // NEW: shallow-surface-structure exemption
+        smartFillSurfaceStructureMinY = cfg.getInt("replacement.smart-fill.surface-structures.min-y", 30);
+        smartFillMaxShallowPocketHeight = Math.max(1, Math.min(32,
+                cfg.getInt("replacement.smart-fill.surface-structures.max-pocket-height", 10)));
+        if (smartFillSurfaceStructureMinY <= voidY) {
+            int clamped = voidY + 10;
+            getLogger().warning("[FPAntiFreeCam] smart-fill surface-structures.min-y ("
+                    + smartFillSurfaceStructureMinY + ") must be > void-y (" + voidY
+                    + "). Clamping to " + clamped);
+            smartFillSurfaceStructureMinY = clamped;
+        }
+
+        if (smartFillReveal != null) smartFillReveal.loadSettings();
+
         protectedWorlds.clear();
         List<String> worldList = cfg.getStringList("worlds.list");
         if (worldList != null) protectedWorlds.addAll(worldList);
@@ -455,11 +612,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         preLoadDistance       = cfg.getInt("performance.instant-protection.pre-load-distance", 10);
         forceImmediateRefresh = cfg.getBoolean("performance.instant-protection.force-immediate-refresh", true);
 
-        // Raycast settings
-        raycastEnabled         = cfg.getBoolean("protection.raycast.enabled", true);
-        raycastMinUpward       = cfg.getDouble("protection.raycast.min-upward-angle", 0.15);
-        raycastDebounceMs      = cfg.getLong("protection.raycast.deactivation-debounce-ms", 500L);
-        raycastMultiDirectional= cfg.getBoolean("protection.raycast.multi-directional", true);
+        // Raycast zone checks use fixed, tuned values (no longer configurable).
+        raycastEnabled         = true;
+        raycastMinUpward       = 0.15;
+        raycastDebounceMs      = 500L;
+        raycastMultiDirectional= true;
 
         deepDeactivationY = cfg.getDouble("protection.deep-deactivation-y", 20.0);
 
@@ -475,6 +632,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         loadLanguageConfig(cfg.getString("settings.language", "en"), configWasUpdated);
         if (entityHider     != null) entityHider.loadSettings();
         if (freecamDetector != null) freecamDetector.loadSettings();
+        if (paperScheduler  != null) paperScheduler.loadSettings();
 
         // Validate Y thresholds
         if (deepDeactivationY >= protectionY) {
@@ -498,7 +656,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 + " perWorldVoidY=" + perWorldVoidY
                 + " block=" + replacementBlockType
                 + " raycast=" + raycastEnabled
-                + " multiDir=" + raycastMultiDirectional);
+                + " multiDir=" + raycastMultiDirectional
+                + " smartFill=" + smartFillEnabled);
     }
 
     /**
@@ -594,6 +753,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public void handlePlayerInitialState(Player player, boolean immediateRefresh) {
         if (!isWorldProtected(player.getWorld().getName())) {
             boolean wasCached = playerHiddenState.remove(player.getUniqueId()) != null;
+            smartFillDisarmedForRelog.remove(player.getUniqueId());
             if (wasCached && immediateRefresh) refreshFullView(player);
             return;
         }
@@ -601,6 +761,19 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         boolean bypass     = hasBypass(player);
         boolean shouldHide = !bypass && player.getLocation().getY() >= protectionY;
         playerHiddenState.put(player.getUniqueId(), shouldHide);
+
+        // BUGFIX: see smartFillDisarmedForRelog's javadoc - a player who
+        // joins or changes world while already underground gets Smart Fill
+        // disarmed entirely until they naturally surface, instead of having
+        // camouflage/hard-floor masking applied to their own surroundings
+        // from the very first chunk packet with no way to reveal it.
+        if (!bypass && !shouldHide && smartFillEnabled) {
+            smartFillDisarmedForRelog.add(player.getUniqueId());
+            dbg("Smart Fill disarmed for relog: " + player.getName() + " joined/changed world underground");
+        } else {
+            smartFillDisarmedForRelog.remove(player.getUniqueId());
+        }
+
         dbg("InitialState " + player.getName() + " hidden=" + shouldHide
                 + " Y=" + String.format("%.1f", player.getLocation().getY()));
 
@@ -667,9 +840,10 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     //  Background tasks
     // ═════════════════════════════════════════════════════════════════════
 
-    /** Raycast monitor: runs every 5 ticks (250 ms). */
+    /** Raycast monitor: runs every 5 ticks (250 ms). Also feeds Smart Fill's look-direction cone. */
     private void startRaycastTask() {
-        if (!raycastEnabled) return;
+        boolean feedLookCone = smartFillEnabled && smartFillReveal != null;
+        if (!raycastEnabled && !feedLookCone) return;
         Runnable check = () -> {
             for (Player p : Bukkit.getOnlinePlayers()) {
                 if (isWorldProtected(p.getWorld().getName()) && !hasBypass(p)) {
@@ -679,9 +853,15 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                     if (PlatformUtil.isFolia()) {
                         Player captured = p;
                         PlatformUtil.runTask(this, captured.getLocation(),
-                                () -> { if (captured.isOnline()) checkRaycastActivation(captured); });
+                                () -> {
+                                    if (captured.isOnline()) {
+                                        if (raycastEnabled) checkRaycastActivation(captured);
+                                        if (smartFillReveal != null) smartFillReveal.updateLosReveal(captured);
+                                    }
+                                });
                     } else {
-                        checkRaycastActivation(p);
+                        if (raycastEnabled) checkRaycastActivation(p);
+                        if (smartFillReveal != null) smartFillReveal.updateLosReveal(p);
                     }
                 }
             }
@@ -690,18 +870,28 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     }
 
     /**
-     * NEW: Sends the action bar indicator to protected players every 40 ticks (2 s).
-     * Only active when notifications.action-bar.enabled is true.
+     * Every 40 ticks (2 s): sends the action bar indicator and runs freeze
+     * detection, each only when enabled in config.
      */
     private void startActionBarTask() {
-        if (!actionBarEnabled) return;
+        if (!actionBarEnabled && !freezeDetectionEnabled) return;
         Runnable tick = () -> {
             String msg = ChatUtil.color(actionBarActiveMsg);
             for (Player p : Bukkit.getOnlinePlayers()) {
-                if (isProtectionActive(p)) {
+                if (actionBarEnabled && isProtectionActive(p)) {
                     try {
                         p.sendActionBar(msg);
                     } catch (Exception ignored) {}
+                }
+                if (freezeDetectionEnabled) {
+                    if (PlatformUtil.isFolia()) {
+                        Player captured = p;
+                        PlatformUtil.runForEntity(this, captured, () -> {
+                            if (captured.isOnline()) checkFreezeDetection(captured);
+                        });
+                    } else {
+                        checkFreezeDetection(p);
+                    }
                 }
             }
         };
@@ -718,7 +908,159 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             if (entityHider != null) entityHider.periodicCleanup();
             if (bedrockSupport != null) bedrockSupport.periodicCleanup();
             if (chunkListener != null) chunkListener.pruneStaleCache();
+            if (smartFillReveal != null) smartFillReveal.pruneRecentlyRevealed();
         }, 1200L, 1200L); // every 60 s
+    }
+
+    /**
+     * NEW: Smart Fill's continuous camouflage is computed per-packet from the
+     * player's LIVE position, so the fill/reveal decision itself is always
+     * correct the instant a chunk packet goes out. But Minecraft only sends
+     * CHUNK_DATA on load/teleport — normal walking never re-sends a chunk
+     * that's already loaded client-side. Without this task, a player walking
+     * toward a camouflaged area would keep seeing the fake terrain forever
+     * (or until they left and re-entered render distance), because nothing
+     * ever told the client "re-fetch this chunk, the fill/reveal result
+     * changed". This runs every 10 ticks (0.5s), and whenever a Smart-Fill
+     * -active player crosses into a new chunk, refreshes a small ring of
+     * chunks around them (sized to the reveal radius) so nearby fake blocks
+     * are recomputed and turn real as they approach — the "gradual reveal"
+     * behavior, both descending from the surface and walking horizontally
+     * toward a previously hidden area.
+     */
+    private void startSmartFillProximityTask() {
+        if (!smartFillEnabled || !smartFillAlwaysOn) return;
+        Runnable check = () -> {
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                if (!isWorldProtected(p.getWorld().getName())) continue;
+                if (PlatformUtil.isFolia()) {
+                    Player captured = p;
+                    PlatformUtil.runTask(this, captured.getLocation(), () -> {
+                        if (captured.isOnline()) maybeRefreshSmartFillProximity(captured);
+                    });
+                } else {
+                    maybeRefreshSmartFillProximity(p);
+                }
+            }
+        };
+        smartFillProximityTask = PlatformUtil.runTaskTimer(this, check, 10L, 10L);
+    }
+
+    /**
+     * Refreshes a small ring of chunks around the player when either their
+     * chunk position OR their look direction has meaningfully changed since
+     * the last check, and only once per SMART_FILL_REFRESH_COOLDOWN_MS per
+     * player.
+     *
+     * <p>BUGFIX: this used to only trigger on crossing into a new chunk.
+     * Minecraft never sends a chunk packet just because a player turns their
+     * head - only on movement across a chunk boundary or a real block
+     * change - so the look-direction reveal cone in SmartFillReveal had no
+     * way to actually take effect for a player who walks up to a wall, stops
+     * moving, and turns to face it: the chunk was already sent (masked)
+     * before they turned, and nothing told the client to re-fetch it, so the
+     * fake wall just sat there no matter which way they looked. Tracking a
+     * look-ahead point (not just the player's own chunk) and triggering a
+     * refresh when THAT crosses into a new chunk fixes it, while the shared
+     * per-player cooldown still keeps this from spamming refreshes every
+     * half-second on a spinning camera.
+     */
+    private void maybeRefreshSmartFillProximity(Player player) {
+        if (!isSmartFillActiveFor(player)) return;
+        UUID id = player.getUniqueId();
+        Location loc = player.getLocation();
+        long posChunkKey = (((long) (loc.getBlockX() >> 4)) << 32) ^ (loc.getBlockZ() >> 4);
+
+        int revealRadius = smartFillReveal != null ? smartFillReveal.getRevealRadius() : 28;
+        int lookDistance = smartFillReveal != null ? smartFillReveal.getLookDistance() : 48;
+
+        // Look-ahead point roughly mid-way into the look cone - far enough
+        // that turning to face a different wall actually lands in a
+        // different chunk, not so far that minor head wobble triggers it.
+        Vector dir = player.getEyeLocation().getDirection();
+        Location eye = player.getEyeLocation();
+        int lookAheadDist = Math.min(lookDistance, revealRadius + 8);
+        int aheadX = eye.getBlockX() + (int) Math.round(dir.getX() * lookAheadDist);
+        int aheadZ = eye.getBlockZ() + (int) Math.round(dir.getZ() * lookAheadDist);
+        long lookChunkKey = (((long) (aheadX >> 4)) << 32) ^ (aheadZ >> 4);
+
+        long combinedKey = posChunkKey * 1_000_003L ^ lookChunkKey;
+
+        Long last = smartFillLastChunkKey.put(id, combinedKey);
+        if (last != null && last == combinedKey) return; // same position AND same gaze target as last check
+
+        long now = System.currentTimeMillis();
+        long cooldownUntil = smartFillRefreshCooldown.getOrDefault(id, 0L);
+        if (now < cooldownUntil) return;
+        smartFillRefreshCooldown.put(id, now + SMART_FILL_REFRESH_COOLDOWN_MS);
+
+        // Sized off whichever is larger, revealRadius or lookDistance, so the
+        // refreshed ring around the player's OWN position fully covers the
+        // far end of the look cone too, not just the proximity sphere.
+        int chunkRadius = (Math.max(revealRadius, lookDistance) / 16) + 2;
+        performRefresh(player, chunkRadius);
+        dbg("Smart Fill proximity refresh for " + player.getName() + " (chunkRadius=" + chunkRadius + ")");
+    }
+
+    /**
+     * Line-of-sight sweep, once per second per Smart-Fill-active player, on
+     * the region thread that owns them. When new sections come into sight,
+     * refreshes just those chunk columns so the client gets the real blocks.
+     */
+    private void startSmartFillSightTask() {
+        if (!smartFillEnabled || smartFillReveal == null || !smartFillReveal.isSightEnabled()) return;
+        Runnable check = () -> {
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                if (!isWorldProtected(p.getWorld().getName())) continue;
+                if (PlatformUtil.isFolia()) {
+                    Player captured = p;
+                    PlatformUtil.runTask(this, captured.getLocation(), () -> {
+                        if (captured.isOnline()) runSmartFillSight(captured);
+                    });
+                } else {
+                    runSmartFillSight(p);
+                }
+            }
+        };
+        smartFillSightTask = PlatformUtil.runTaskTimer(this, check, 20L, 20L);
+    }
+
+    private void runSmartFillSight(Player player) {
+        if (smartFillReveal == null) return;
+        if (!isSmartFillActiveFor(player)) {
+            smartFillReveal.clearSight(player.getUniqueId());
+            return;
+        }
+        Set<Long> columns;
+        try {
+            columns = smartFillReveal.computeLineOfSight(player);
+        } catch (Exception e) {
+            dbg("Smart Fill sight sweep failed for " + player.getName() + ": " + e.getMessage());
+            return;
+        }
+        if (columns.isEmpty()) return;
+
+        Collection<Long> toRefresh = columns;
+        if (columns.size() > SMART_FILL_SIGHT_MAX_REFRESH_COLUMNS) {
+            // Keep the columns nearest the player; the rest follow on later sweeps as they stay in sight.
+            int pcx = player.getLocation().getBlockX() >> 4;
+            int pcz = player.getLocation().getBlockZ() >> 4;
+            toRefresh = columns.stream()
+                    .sorted(Comparator.comparingLong(k -> {
+                        long dx = (int) (k >> 32) - pcx, dz = (int) (long) k - pcz;
+                        return dx * dx + dz * dz;
+                    }))
+                    .limit(SMART_FILL_SIGHT_MAX_REFRESH_COLUMNS)
+                    .collect(Collectors.toList());
+        }
+
+        if (foliaScheduler != null) {
+            foliaScheduler.refreshColumns(player, toRefresh);
+        } else if (paperScheduler != null) {
+            paperScheduler.refreshColumns(player, toRefresh);
+        }
+        dbg("Smart Fill sight refresh for " + player.getName() + " (" + toRefresh.size()
+                + "/" + columns.size() + " columns)");
     }
 
     private void cancelTask(Object task) {
@@ -736,9 +1078,13 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         cancelTask(raycastTask);
         cancelTask(actionBarTask);
         cancelTask(entityHiderCleanupTask);
+        cancelTask(smartFillProximityTask);
+        cancelTask(smartFillSightTask);
         raycastTask = null;
         actionBarTask = null;
         entityHiderCleanupTask = null;
+        smartFillProximityTask = null;
+        smartFillSightTask = null;
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -780,6 +1126,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         raycastDeactivationPending.remove(id);
         playerHiddenState.put(id, targetHidden);
+        if (targetHidden) smartFillDisarmedForRelog.remove(id); // naturally reached the surface
         if (entityHider != null) entityHider.updateFor(player);
         refreshFullView(player, !targetHidden); // bypass cooldown when turning OFF
 
@@ -873,6 +1220,10 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (bedrockSupport  != null) bedrockSupport.cleanupPlayer(id);
         if (entityHider     != null) entityHider.cleanupPlayer(id);
         if (freecamDetector != null) freecamDetector.cleanupPlayer(id);
+        if (smartFillReveal != null) smartFillReveal.cleanupPlayer(id);
+        smartFillLastChunkKey.remove(id);
+        smartFillRefreshCooldown.remove(id);
+        smartFillDisarmedForRelog.remove(id);
         dbg("Cleaned up quit player: " + event.getPlayer().getName());
     }
 
@@ -881,6 +1232,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         Player player  = event.getPlayer();
         String toWorld = player.getWorld().getName();
         dbg("WorldChange: " + player.getName() + " → " + toWorld);
+        if (smartFillReveal != null) smartFillReveal.clearSight(player.getUniqueId());
         // Refresh bypass cache — permissions may differ per world
         hasBypass(player);
         if (isWorldProtected(toWorld)) {
@@ -896,6 +1248,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public void onPlayerTeleport(PlayerTeleportEvent event) {
         Player player = event.getPlayer();
         if (internallyTeleporting.contains(player.getUniqueId())) return;
+        if (smartFillReveal != null) smartFillReveal.clearSight(player.getUniqueId());
 
         var to   = event.getTo();
         var from = event.getFrom();
@@ -963,6 +1316,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             PlatformUtil.runTask(this, dest, () -> {
                 if (!player.isOnline()) return;
                 playerHiddenState.put(id, true);
+                smartFillDisarmedForRelog.remove(id); // naturally reached the surface
                 internallyTeleporting.add(id);
                 // BUGFIX: see comment above – use teleportAsync() on Folia-safe path.
                 player.teleportAsync(dest).whenComplete((success, throwable) ->
@@ -1021,22 +1375,14 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         // Fast-path: skip if player hasn't crossed a block boundary on Y.
         if (from.getBlockY() == to.getBlockY()) {
-            // Still run freeze detection even if Y hasn't changed
-            if (freezeDetectionEnabled) checkFreezeDetection(player, to);
+            if (freezeDetectionEnabled) trackSignificantMove(player.getUniqueId(), to);
             return;
         }
 
         UUID    id     = player.getUniqueId();
         boolean bypass = hasBypass(player);
 
-        // Update freeze-detection tracking
-        if (freezeDetectionEnabled) {
-            Location last = lastSignificantMoveLoc.get(id);
-            if (last == null || to.distanceSquared(last) >= 0.25) { // 0.5 block threshold
-                lastSignificantMoveMs.put(id, System.currentTimeMillis());
-                lastSignificantMoveLoc.put(id, to.clone());
-            }
-        }
+        if (freezeDetectionEnabled) trackSignificantMove(id, to);
 
         // Layer 3: at/above protectionY → always ON
         // Layer 1: below deepDeactivationY → always OFF
@@ -1076,6 +1422,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         dbg("Move transition " + player.getName() + ": " + oldHidden
                 + " → " + newHidden + " at Y=" + to.getY());
         playerHiddenState.put(id, newHidden);
+        if (newHidden) smartFillDisarmedForRelog.remove(id); // naturally reached the surface
         if (entityHider != null) entityHider.updateFor(player);
 
         if (!newHidden) {
@@ -1107,25 +1454,43 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         }
     }
 
+    /** Records a move of at least 0.5 blocks for freeze detection. */
+    private void trackSignificantMove(UUID id, Location to) {
+        Location last = lastSignificantMoveLoc.get(id);
+        if (last == null || !last.getWorld().equals(to.getWorld()) || to.distanceSquared(last) >= 0.25) {
+            lastSignificantMoveMs.put(id, System.currentTimeMillis());
+            lastSignificantMoveLoc.put(id, to.clone());
+        }
+    }
+
     /**
-     * NEW: Freeze detection helper. Logs a warning if a protected player
-     * hasn't moved significantly in freezeDetectionSeconds seconds.
-     * Possible sign of position-spoofing FreeCam.
+     * Freeze detection: warns if a protected player hasn't moved 0.5 blocks
+     * in freezeDetectionSeconds. Runs from the periodic task, since a fully
+     * frozen player sends no move events at all.
      */
-    private void checkFreezeDetection(Player player, Location current) {
-        if (!isProtectionActive(player)) return;
+    private void checkFreezeDetection(Player player) {
         UUID id = player.getUniqueId();
+        if (!isProtectionActive(player)) {
+            lastSignificantMoveMs.remove(id);
+            lastSignificantMoveLoc.remove(id);
+            return;
+        }
+        Location current = player.getLocation();
+        long now = System.currentTimeMillis();
+        if (!lastSignificantMoveMs.containsKey(id)) {
+            lastSignificantMoveMs.put(id, now);
+            lastSignificantMoveLoc.put(id, current.clone());
+            return;
+        }
 
-        long lastMove = lastSignificantMoveMs.getOrDefault(id, System.currentTimeMillis());
-        long elapsed  = (System.currentTimeMillis() - lastMove) / 1_000L;
-
+        long elapsed = (now - lastSignificantMoveMs.get(id)) / 1_000L;
         if (elapsed >= freezeDetectionSeconds) {
             getLogger().warning("[FPAntiFreeCam] FREEZE ALERT: " + player.getName()
                     + " has not moved for " + elapsed + "s while above protectionY "
                     + "(Y=" + String.format("%.1f", current.getY()) + "). "
                     + "Possible position-spoofing FreeCam.");
             // Reset to avoid repeated alerts
-            lastSignificantMoveMs.put(id, System.currentTimeMillis());
+            lastSignificantMoveMs.put(id, now);
             lastSignificantMoveLoc.put(id, current.clone());
         }
     }
@@ -1151,6 +1516,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             });
         } else if (!willBypass && !currentHidden && player.getLocation().getY() >= protectionY) {
             playerHiddenState.put(id, true);
+            smartFillDisarmedForRelog.remove(id); // naturally reached the surface
             if (entityHider != null) entityHider.updateFor(player);
             PlatformUtil.runTask(this, player.getLocation(), () -> {
                 if (player.isOnline()) refreshFullView(player); // refresh view to hide
@@ -1184,6 +1550,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         if (currentHidden != targetHidden) {
             playerHiddenState.put(id, targetHidden);
+            if (targetHidden) smartFillDisarmedForRelog.remove(id); // naturally reached the surface
             // BUGFIX: this used to only run when arming (targetHidden == true), so
             // dismounting a vehicle while descending below protectionY never re-showed
             // entities EntityHider had hidden — they'd stay hidden until some unrelated
@@ -1296,6 +1663,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         startRaycastTask();
         startActionBarTask();
         startEntityHiderCleanupTask();
+        startSmartFillProximityTask();
+        startSmartFillSightTask();
         ChatUtil.sendSuccess(sender, lang("reload-success", String.join(", ", protectedWorlds)));
         return true;
     }
@@ -1434,6 +1803,14 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (entityHider     != null) ChatUtil.send(sender, " &7EntityHider &8: &a" + entityHider.stats());
         if (chunkListener   != null) ChatUtil.send(sender, " &7EntityYCache&8: &a" + chunkListener.getEntityCacheSize() + " entries");
         if (freecamDetector != null) ChatUtil.send(sender, " &7FreecamDetect&8: " + (freecamDetector.isEnabled() ? "&aON" : "&7OFF"));
+        ChatUtil.send(sender, " \u00a77SmartFill  \u00a78: " + (smartFillEnabled
+                ? "\u00a7aON \u00a78| \u00a77cache \u00a78= \u00a7e" + (chunkListener != null ? chunkListener.getSmartFillCacheSize() : 0) + " \u00a77palettes"
+                + " \u00a78| \u00a77sampleR \u00a78= \u00a7e" + smartFillSampleRadius
+                + " \u00a78| \u00a77maxPalette \u00a78= \u00a7e" + smartFillMaxPaletteSize
+                + " \u00a78| \u00a77relogDisarmed \u00a78= \u00a7e" + smartFillDisarmedForRelog.size()
+                : "\u00a77OFF"));
+        if (smartFillReveal != null && smartFillEnabled)
+            ChatUtil.send(sender, " \u00a77SmartReveal\u00a78: \u00a7a" + smartFillReveal.stats());
         if (foliaScheduler  != null) ChatUtil.send(sender, " &7Folia Sched &8: &a" + foliaScheduler.stats());
         if (paperScheduler  != null) ChatUtil.send(sender, " &7Paper Sched &8: &a" + paperScheduler.stats());
         ChatUtil.send(sender, sep);
@@ -1509,6 +1886,14 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         saveConfig();
     }
 
+    /** Keys removed from config.yml; deleted from existing configs on update. */
+    private static final String[] OBSOLETE_CONFIG_KEYS = {
+            "protection.raycast",
+            "protection.smart-fill.reveal-flood-fill-budget",
+            "performance.folia-optimizations",
+            "freecam-detection.translation-keys",
+    };
+
     private boolean checkConfigVersion() {
         FileConfiguration cfg = getConfig();
         Object rawVer = cfg.get("config-version", 0);
@@ -1518,10 +1903,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             try { currentVer = Double.parseDouble(rawVer.toString()); }
             catch (Exception e) { currentVer = 0.0; }
         }
-        double latestVer = 4.6;
+        double latestVer = 5.1;
 
         if (currentVer < latestVer) {
             getLogger().info("[FPAntiFreeCam] Updating config.yml to version " + latestVer + "…");
+            for (String key : OBSOLETE_CONFIG_KEYS) cfg.set(key, null);
             InputStream defStream = getResource("config.yml");
             if (defStream != null) {
                 YamlConfiguration defConfig = YamlConfiguration.loadConfiguration(

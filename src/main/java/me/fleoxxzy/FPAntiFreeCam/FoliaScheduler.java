@@ -5,6 +5,7 @@ import org.bukkit.World;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
+import java.util.Collection;
 import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
@@ -58,6 +59,31 @@ public final class FoliaScheduler {
         }
 
         lastRefreshTime.put(id, now);
+    }
+
+    /**
+     * Refreshes specific chunk columns (keys packed as
+     * {@code (cx << 32) | (cz & 0xFFFFFFFFL)}), grouped by region so each
+     * batch runs on its owning thread. Not subject to the refreshChunks
+     * cooldown; callers rate-limit themselves.
+     */
+    public void refreshColumns(Player player, Collection<Long> columnKeys) {
+        Location loc   = player.getLocation();
+        World    world = loc.getWorld();
+        if (world == null) return;
+
+        Map<String, Queue<ChunkTask>> byRegion = new ConcurrentHashMap<>();
+        for (long key : columnKeys) {
+            int cx = (int) (key >> 32);
+            int cz = (int) key;
+            Location chunkLoc = new Location(world, cx * 16.0, loc.getY(), cz * 16.0);
+            byRegion.computeIfAbsent(regionKey(chunkLoc), k -> new ConcurrentLinkedQueue<>())
+                    .offer(new ChunkTask(world, cx, cz, chunkLoc));
+        }
+        for (Queue<ChunkTask> tasks : byRegion.values()) {
+            ChunkTask first = tasks.peek();
+            if (first != null) scheduleRegion(first.loc, tasks);
+        }
     }
 
     public void cleanupPlayer(UUID id) {

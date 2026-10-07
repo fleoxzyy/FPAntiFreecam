@@ -9,6 +9,8 @@ import com.github.retrooper.packetevents.protocol.world.chunk.BaseChunk;
 import com.github.retrooper.packetevents.protocol.world.chunk.Column;
 import com.github.retrooper.packetevents.protocol.world.chunk.TileEntity;
 import com.github.retrooper.packetevents.protocol.world.states.WrappedBlockState;
+import com.github.retrooper.packetevents.protocol.world.states.type.StateType;
+import com.github.retrooper.packetevents.protocol.world.states.type.StateTypes;
 import com.github.retrooper.packetevents.util.Vector3i;
 import com.github.retrooper.packetevents.protocol.entity.type.EntityTypes;
 import com.github.retrooper.packetevents.util.Vector3d;
@@ -69,6 +71,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class ChunkListener implements PacketListener {
 
     private final FPAntiFreeCam plugin;
+    private final SmartFillEngine smartFill;
 
     /**
      * Thread-safe cache of entity ID → last-known Y coordinate.
@@ -77,7 +80,7 @@ public final class ChunkListener implements PacketListener {
      * This avoids the Folia AsyncCatcher crash caused by calling
      * world.getEntities() on the Netty IO thread.
      */
-    private final Map<Integer, Integer> entityYCache = new ConcurrentHashMap<>();
+    private final Map<Integer, int[]> entityYCache = new ConcurrentHashMap<>();
 
     /**
      * PERF: Set of packet types that this listener actually handles.
@@ -121,6 +124,7 @@ public final class ChunkListener implements PacketListener {
 
     public ChunkListener(FPAntiFreeCam plugin) {
         this.plugin = plugin;
+        this.smartFill = new SmartFillEngine(plugin);
     }
 
     /**
@@ -185,8 +189,8 @@ public final class ChunkListener implements PacketListener {
             return;
         }
 
-        if (!plugin.isProtectionActive(player)) {
-            // Still cache entity Y even when protection is inactive
+        if (!plugin.isProtectionActive(player) && !(plugin.isSmartFillEnabled() && plugin.isSmartFillActiveFor(player))) {
+            // Still cache entity Y even when nothing needs hiding right now
             if (isSpawnPacket) cacheEntitySpawnY(event);
             return;
         }
@@ -250,52 +254,215 @@ public final class ChunkListener implements PacketListener {
         World  world         = player.getWorld();
         int    minY          = world.getMinHeight();
         String worldName     = world.getName();
-        int    voidY         = plugin.getVoidY(worldName); // per-world voidY
+        int    hardFloorY    = plugin.getVoidY(worldName); // absolute, always-hidden vault floor
         int    replacementId = plugin.getReplacementBlockId();
+        boolean smartFillEnabled = plugin.isSmartFillEnabled();
 
-        // Early-out: if world minY is already above voidY, no blocks can be hidden.
-        if (minY > voidY) return;
+        // BUGFIX: "useSmartFill" and the surface-triggered playerHiddenState
+        // used to be the SAME on/off switch, and the masked range never went
+        // above hardFloorY. That meant (a) Smart Fill only ever covered the
+        // exact same range flat mode did, leaving every cave between void-y
+        // and protection-y completely unmasked, and (b) the moment a player
+        // dropped below deep-deactivation-y (normal underground play),
+        // protection went fully off and NOTHING was masked anymore, not
+        // even the void-y floor. Smart Fill's whole point is to keep hiding
+        // distant caves/bases while the player is freely mining nearby, so
+        // its activation must not be tied to the player's own surface
+        // exposure state at all. See FPAntiFreeCam.isSmartFillActiveFor() -
+        // by default (always-on: true) it only depends on world/bypass, not
+        // playerHiddenState.
+        boolean smartFillActive = smartFillEnabled && plugin.isSmartFillActiveFor(player);
+        boolean fullProtection  = plugin.isProtectionActive(player);
+
+        if (!smartFillEnabled) {
+            // Legacy flat mode: unchanged from the original behavior. Masks
+            // everything at/below hardFloorY, but ONLY while the player is
+            // in the surface-triggered "hidden" state, exactly like before
+            // Smart Fill existed.
+            if (!fullProtection) return;
+            if (minY > hardFloorY) return;
+
+            boolean modified      = false;
+            long    replacedCount = 0;
+
+            for (int si = 0; si < sections.length; si++) {
+                BaseChunk section = sections[si];
+                if (section == null) continue;
+                if (section.isEmpty() && replacementId == 0) continue;
+
+                int sectionBaseY = minY + si * 16;
+                if (sectionBaseY > hardFloorY) continue;
+
+                for (int ly = 0; ly < 16; ly++) {
+                    int worldY = sectionBaseY + ly;
+                    if (worldY > hardFloorY) break;
+
+                    for (int lx = 0; lx < 16; lx++) {
+                        for (int lz = 0; lz < 16; lz++) {
+                            try {
+                                WrappedBlockState current = section.get(lx, ly, lz);
+                                if (current != null && current.getGlobalId() != replacementId) {
+                                    section.set(lx, ly, lz, replacement);
+                                    replacedCount++;
+                                    modified = true;
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                    }
+                }
+            }
+
+            if (plugin.isPieChartProtectionEnabled() && column != null) {
+                if (stripTileEntitiesBelow(column, hardFloorY, false, null, null)) modified = true;
+            }
+
+            if (modified) {
+                try { wrapper.setIgnoreOldData(true); } catch (Exception ignored) {}
+                event.markForReEncode(true);
+                plugin.incrementChunksModified();
+                plugin.addBlocksReplaced(replacedCount);
+                plugin.dbg("CHUNK_DATA modified for " + player.getName()
+                        + " (" + replacedCount + " blocks, flat, tile entities stripped)");
+            }
+            return;
+        }
+
+        // Smart Fill mode
+        if (!smartFillActive) return; // nothing to hide for this player right now
+
+        int ceilingY = Math.max(hardFloorY, plugin.getSmartFillCeilingY());
+        if (minY > ceilingY) return;
+
+        SmartFillEngine.ColumnPalette palette = null;
+        int chunkX = 0, chunkZ = 0;
+        try {
+            chunkX = column.getX();
+            chunkZ = column.getZ();
+            palette = smartFill.getOrBuildPalette(worldName, chunkX, chunkZ,
+                    sections, minY, ceilingY);
+        } catch (Exception e) {
+            plugin.dbg("SmartFill palette error: " + e.getMessage());
+        }
+
+        SmartFillReveal reveal = plugin.getSmartFillReveal();
+        org.bukkit.Location pLoc = player.getLocation();
+        int pBX = pLoc.getBlockX();
+        int pBY = pLoc.getBlockY();
+        int pBZ = pLoc.getBlockZ();
+        UUID playerId = player.getUniqueId();
 
         boolean modified      = false;
         long    replacedCount = 0;
 
         for (int si = 0; si < sections.length; si++) {
             BaseChunk section = sections[si];
-            if (section == null || section.isEmpty()) continue;
+            if (section == null) continue;
 
             int sectionBaseY = minY + si * 16;
-
-            // Optimization: skip the whole section if its bottom is above voidY.
-            if (sectionBaseY > voidY) continue;
+            if (sectionBaseY > ceilingY) continue;
 
             for (int ly = 0; ly < 16; ly++) {
                 int worldY = sectionBaseY + ly;
-                if (worldY > voidY) break;
+                if (worldY > ceilingY) break;
 
                 for (int lx = 0; lx < 16; lx++) {
+                    int worldX = (chunkX << 4) | lx;
+
                     for (int lz = 0; lz < 16; lz++) {
-                        try {
-                            WrappedBlockState current = section.get(lx, ly, lz);
-                            if (current != null && current.getGlobalId() != replacementId) {
-                                section.set(lx, ly, lz, replacement);
-                                replacedCount++;
-                                modified = true;
-                            }
+                    int worldZ = (chunkZ << 4) | lz;
+                try {
+                                WrappedBlockState current = section.get(lx, ly, lz);
+
+                                // IMPROVEMENT: shallow surface structures
+                                // (PvP arenas, crystal holes, player-built
+                                // rooms) are exempted entirely - roof,
+                                // floor, and interior - before either the
+                                // hard-floor or camouflage-band logic below
+                                // gets a say. See isExemptSurfaceStructure's
+                                // javadoc and config.yml's surface-structures
+                                // comment for why this can't just be a flat
+                                // Y cutoff.
+                                if (smartFill.isExemptSurfaceStructure(palette, lx, lz, worldY)) continue;
+
+                if (worldY <= hardFloorY) {
+                    // BUGFIX: this used to be "always masked,
+                    // no reveal exception" on the theory that
+                    // the vault floor should never be visible
+                    // to anyone. But Smart Fill's activation
+                    // is no longer coupled to the player's
+                    // own playerHiddenState, so a player
+                // genuinely playing/mining at or below
+                // void-y had their OWN surroundings
+                // replaced with flat air with no way to
+                    // see them - showing up as pure black
+                    // void or, wherever real terrain dipped
+                        // below void-y near the surface (beaches,
+                                    // ravines, ocean floors), as floating
+                        // pillars of terrain sticking up above
+                        // the artificial void line. Apply the
+                        // same proximity/look reveal used by the
+                                    // camouflage band above it, so the vault
+                        // stays invisible to anyone far away or
+                        // above (freecam) but looks completely
+                        // normal to whoever is actually standing
+                        // there.
+                        if (reveal != null && reveal.isAirRevealed(
+                                worldX, worldY, worldZ, playerId, pBX, pBY, pBZ)) {
+                            continue; // player is physically here - show the real block
+                        }
+                        // IMPROVEMENT: fill with the depth-adaptive palette
+                        // (same one the camouflage band above uses) instead
+                        // of flat air. Flat air this deep, with no nearby
+                        // light source, rendered as a solid black mass from
+                        // a distance - just as obvious a "something is being
+                        // hidden here" signal as showing the real terrain
+                        // would be. An endless stretch of deepslate blends
+                        // in and gives nothing away.
+                        WrappedBlockState hardFloorFill = palette != null
+                                ? smartFill.selectState(palette, worldX, worldY, worldZ)
+                                : smartFill.getDefaultState(worldName, worldY);
+                        if (current == null || current.getGlobalId() != hardFloorFill.getGlobalId()) {
+                            section.set(lx, ly, lz, hardFloorFill);
+                                        replacedCount++;
+                            modified = true;
+                        }
+                continue;
+                }
+
+                                // Smart Fill camouflage band
+                                StateType type = current != null ? current.getType() : StateTypes.AIR;
+                                if (SmartFillEngine.isSafeTerrain(type)) continue; // already looks natural
+
+                                // BUGFIX: previously anything between hardFloorY and
+                                // ceilingY that wasn't "safe terrain" got filled
+                                // unconditionally, including open sky above shallow
+                                // beaches/oceans that just happen to sit below
+                                // ceilingY (protection-y). That produced a floating
+                                // stone blanket hovering over water/sand at the
+                                // real surface. Skip filling anywhere with no solid
+                                // roof above it in the real column - only genuine
+                                // roofed-over cave pockets get camouflaged.
+                                if (smartFill.isOpenToSky(palette, lx, lz, worldY)) continue;
+
+                                if (reveal != null && reveal.isAirRevealed(
+                                        worldX, worldY, worldZ, playerId, pBX, pBY, pBZ)) {
+                                    continue; // near/looked-at -> show the real block
+                                }
+
+                            WrappedBlockState fill = palette != null
+                                    ? smartFill.selectState(palette, worldX, worldY, worldZ)
+                                    : smartFill.getDefaultState(worldName, worldY);
+                            section.set(lx, ly, lz, fill);
+                            replacedCount++;
+                            modified = true;
                         } catch (Exception ignored) {}
                     }
                 }
             }
         }
 
-        // ── IMPROVEMENT: strip tile entities below voidY ──────────────────
-        // The CHUNK_DATA packet includes a list of block entity (tile entity) NBT
-        // compounds. Even though we replaced the block states with air, a modified
-        // client could still parse these compounds and learn chest locations/contents.
-        // We remove any tile entity whose Y coordinate is at or below voidY.
-        // BUGFIX: this was previously unconditional, ignoring protection.pie-chart-protection
-        // entirely. Tile-entity stripping now only runs when the setting is actually enabled.
         if (plugin.isPieChartProtectionEnabled() && column != null) {
-            boolean tileModified = stripTileEntitiesBelow(column, voidY);
+            boolean tileModified = stripTileEntitiesBelow(column, ceilingY, true, reveal, playerId);
             if (tileModified) modified = true;
         }
 
@@ -305,20 +472,17 @@ public final class ChunkListener implements PacketListener {
             plugin.incrementChunksModified();
             plugin.addBlocksReplaced(replacedCount);
             plugin.dbg("CHUNK_DATA modified for " + player.getName()
-                    + " (" + replacedCount + " blocks, tile entities stripped)");
+                    + " (" + replacedCount + " blocks, smart-fill, tile entities stripped)");
         }
     }
 
     /**
-     * Strips tile entity entries at or below {@code voidY} from the chunk column.
-     *
-     * <p>Because {@link Column} does not expose a public setter for its
-     * {@code tileEntities} field, we use reflection. The field name
-     * {@code "tileEntities"} is stable across PacketEvents 2.x.
-     *
-     * @return true if at least one tile entity was removed and re-encoding is needed.
+     * Strips tile entity entries from the chunk column.
+     * In smart-fill mode, strips tile entities in unrevealed cave areas up to ceilingY.
+     * In flat mode, strips all tile entities at or below voidY.
      */
-    private boolean stripTileEntitiesBelow(Column column, int voidY) {
+    private boolean stripTileEntitiesBelow(Column column, int maxY, boolean useSmartFill,
+                                           SmartFillReveal reveal, UUID playerId) {
         try {
             TileEntity[] tileEntities = column.getTileEntities();
             if (tileEntities == null || tileEntities.length == 0) return false;
@@ -329,12 +493,20 @@ public final class ChunkListener implements PacketListener {
             for (TileEntity te : tileEntities) {
                 if (te == null) continue;
                 int teY = te.getY();
-                if (teY <= voidY) {
-                    changed = true;
-                    plugin.dbg("Stripped tile entity at Y=" + teY);
-                } else {
-                    filtered.add(te);
+                if (teY <= maxY) {
+                    if (useSmartFill && reveal != null) {
+                        if (!reveal.isPositionRevealed(playerId, te.getX(), teY, te.getZ())) {
+                            changed = true;
+                            plugin.dbg("Stripped smart-fill tile entity at " + te.getX() + "," + teY + "," + te.getZ());
+                            continue;
+                        }
+                    } else if (!useSmartFill) {
+                        changed = true;
+                        plugin.dbg("Stripped tile entity at Y=" + teY);
+                        continue;
+                    }
                 }
+                filtered.add(te);
             }
 
             if (!changed) return false;
@@ -369,16 +541,96 @@ public final class ChunkListener implements PacketListener {
             Vector3i pos = wrapper.getBlockPosition();
             if (pos == null) return;
 
-            int voidY = plugin.getVoidY(player.getWorld().getName());
-            if (pos.getY() > voidY) return;
+            String worldName = player.getWorld().getName();
+            int hardFloorY = plugin.getVoidY(worldName);
+            boolean smartFillEnabled = plugin.isSmartFillEnabled();
 
-            int replacementId = plugin.getReplacementBlockId();
-            if (wrapper.getBlockState().getGlobalId() != replacementId) {
-                wrapper.setBlockState(replacement);
-                event.markForReEncode(true);
-                plugin.addBlocksReplaced(1);
-                plugin.dbg("BLOCK_CHANGE modified at " + pos + " for " + player.getName());
+            if (!smartFillEnabled) {
+                // Legacy flat mode
+                if (!plugin.isProtectionActive(player)) return;
+                if (pos.getY() > hardFloorY) return;
+                int replacementId = plugin.getReplacementBlockId();
+                if (wrapper.getBlockState().getGlobalId() != replacementId) {
+                    wrapper.setBlockState(replacement);
+                    event.markForReEncode(true);
+                    plugin.addBlocksReplaced(1);
+                    plugin.dbg("BLOCK_CHANGE modified at " + pos + " for " + player.getName());
+                }
+                return;
             }
+
+            if (!plugin.isSmartFillActiveFor(player)) return;
+            int ceilingY = Math.max(hardFloorY, plugin.getSmartFillCeilingY());
+
+            // Invalidate palette cache if block changes near/above the boundary,
+            // so a real terrain edit near the surface eventually shows up in
+            // future fills instead of the palette going stale forever.
+            int sampleCeiling = ceilingY + (plugin.getSmartFillSampleRadius() + 1) * 16;
+            if (pos.getY() > hardFloorY && pos.getY() <= sampleCeiling) {
+                smartFill.invalidate(worldName, pos.getX() >> 4, pos.getZ() >> 4);
+            }
+
+            if (pos.getY() > ceilingY) return;
+
+            SmartFillEngine.ColumnPalette palette =
+                    smartFill.getCachedPalette(worldName, pos.getX() >> 4, pos.getZ() >> 4);
+
+            // IMPROVEMENT: shallow surface structures (PvP arenas, crystal
+            // holes, player-built rooms) are exempted entirely - see the
+            // matching comment in handleChunkData.
+            if (smartFill.isExemptSurfaceStructure(palette, pos.getX() & 15, pos.getZ() & 15, pos.getY())) return;
+
+            if (pos.getY() <= hardFloorY) {
+                // BUGFIX: see the matching comment in handleChunkData - apply
+                // the same proximity/look reveal to the hard floor so a
+                // player genuinely playing at/below void-y sees their own
+                // real surroundings instead of forced flat air.
+                SmartFillReveal hardFloorReveal = plugin.getSmartFillReveal();
+                if (hardFloorReveal != null) {
+                    org.bukkit.Location pLoc = player.getLocation();
+                    if (hardFloorReveal.isAirRevealed(pos.getX(), pos.getY(), pos.getZ(),
+                            player.getUniqueId(), pLoc.getBlockX(), pLoc.getBlockY(), pLoc.getBlockZ())) {
+                        return; // player is physically here - keep the real block
+                    }
+                }
+                // IMPROVEMENT: adaptive fill instead of flat air - see the
+                // matching comment in handleChunkData.
+                WrappedBlockState hardFloorFill = palette != null
+                        ? smartFill.selectState(palette, pos.getX(), pos.getY(), pos.getZ())
+                        : smartFill.getDefaultState(worldName, pos.getY());
+                if (wrapper.getBlockState().getGlobalId() != hardFloorFill.getGlobalId()) {
+                    wrapper.setBlockState(hardFloorFill);
+                    event.markForReEncode(true);
+                    plugin.addBlocksReplaced(1);
+                    plugin.dbg("BLOCK_CHANGE (hard floor) at " + pos + " for " + player.getName());
+                }
+                return;
+            }
+
+            StateType type = wrapper.getBlockState().getType();
+            if (SmartFillEngine.isSafeTerrain(type)) return; // already looks natural
+
+            // BUGFIX: see the matching comment in handleChunkData - never fill
+            // a position with no real solid roof above it, even if it's below
+            // ceilingY (open sky above a beach/ocean is not a cave).
+            if (smartFill.isOpenToSky(palette, pos.getX() & 15, pos.getZ() & 15, pos.getY())) return;
+
+            SmartFillReveal reveal = plugin.getSmartFillReveal();
+            if (reveal != null) {
+                org.bukkit.Location pLoc = player.getLocation();
+                if (reveal.isAirRevealed(pos.getX(), pos.getY(), pos.getZ(),
+                        player.getUniqueId(), pLoc.getBlockX(), pLoc.getBlockY(), pLoc.getBlockZ())) {
+                    return; // near/looked-at -> keep the real block
+                }
+            }
+
+            WrappedBlockState fill = palette != null
+                    ? smartFill.selectState(palette, pos.getX(), pos.getY(), pos.getZ())
+                    : smartFill.getDefaultState(worldName, pos.getY());
+            wrapper.setBlockState(fill);
+            event.markForReEncode(true);
+            plugin.addBlocksReplaced(1);
+            plugin.dbg("BLOCK_CHANGE smart-fill at " + pos + " for " + player.getName());
         } catch (Exception e) {
             plugin.dbg("BLOCK_CHANGE error: " + e.getMessage());
         }
@@ -396,26 +648,106 @@ public final class ChunkListener implements PacketListener {
             WrapperPlayServerMultiBlockChange.EncodedBlock[] blocks = wrapper.getBlocks();
             if (blocks == null) return;
 
-            boolean modified      = false;
+            String  worldName     = player.getWorld().getName();
+            int     hardFloorY    = plugin.getVoidY(worldName);
             int     replacementId = plugin.getReplacementBlockId();
-            int     voidY         = plugin.getVoidY(player.getWorld().getName());
+            boolean smartFillEnabled = plugin.isSmartFillEnabled();
+
+            boolean modified      = false;
             int     replacedCount = 0;
 
-            for (WrapperPlayServerMultiBlockChange.EncodedBlock block : blocks) {
-                if (block == null) continue;
-                if (block.getY() > voidY) continue;
-                if (block.getBlockId() != replacementId) {
-                    block.setBlockId(replacementId);
-                    replacedCount++;
-                    modified = true;
+            if (!smartFillEnabled) {
+                // Legacy flat mode
+                if (!plugin.isProtectionActive(player)) return;
+                for (WrapperPlayServerMultiBlockChange.EncodedBlock block : blocks) {
+                    if (block == null || block.getY() > hardFloorY) continue;
+                    if (block.getBlockId() != replacementId) {
+                        block.setBlockId(replacementId);
+                        replacedCount++;
+                        modified = true;
+                    }
                 }
+                if (modified) {
+                    event.markForReEncode(true);
+                    plugin.addBlocksReplaced(replacedCount);
+                    plugin.dbg("MULTI_BLOCK_CHANGE modified for " + player.getName()
+                            + " (" + replacedCount + " blocks, flat)");
+                }
+                return;
+            }
+
+            if (!plugin.isSmartFillActiveFor(player)) return;
+            int ceilingY = Math.max(hardFloorY, plugin.getSmartFillCeilingY());
+
+            SmartFillEngine.ColumnPalette palette = null;
+            for (WrapperPlayServerMultiBlockChange.EncodedBlock b : blocks) {
+                if (b != null) {
+                    palette = smartFill.getCachedPalette(worldName, b.getX() >> 4, b.getZ() >> 4);
+                    break;
+                }
+            }
+            SmartFillReveal reveal = plugin.getSmartFillReveal();
+            org.bukkit.Location pLoc = player.getLocation();
+            int pBX = pLoc.getBlockX();
+            int pBY = pLoc.getBlockY();
+            int pBZ = pLoc.getBlockZ();
+            UUID playerId = player.getUniqueId();
+
+            for (WrapperPlayServerMultiBlockChange.EncodedBlock block : blocks) {
+                if (block == null || block.getY() > ceilingY) continue;
+
+                // IMPROVEMENT: shallow surface structures (PvP arenas,
+                // crystal holes, player-built rooms) are exempted entirely -
+                // see the matching comment in handleChunkData.
+                if (smartFill.isExemptSurfaceStructure(palette, block.getX() & 15, block.getZ() & 15, block.getY())) continue;
+
+                if (block.getY() <= hardFloorY) {
+                    // BUGFIX: see the matching comment in handleChunkData -
+                    // apply the same proximity/look reveal to the hard floor
+                    // so a player genuinely playing at/below void-y sees
+                    // their own real surroundings instead of forced flat air.
+                    if (reveal != null && reveal.isAirRevealed(
+                            block.getX(), block.getY(), block.getZ(), playerId, pBX, pBY, pBZ)) {
+                        continue; // player is physically here - keep the real block
+                    }
+                    // IMPROVEMENT: adaptive fill instead of flat air - see the
+                    // matching comment in handleChunkData.
+                    int hardFloorFillId = palette != null
+                            ? smartFill.selectId(palette, block.getX(), block.getY(), block.getZ())
+                            : smartFill.getDefaultState(worldName, block.getY()).getGlobalId();
+                    if (block.getBlockId() != hardFloorFillId) {
+                        block.setBlockId(hardFloorFillId);
+                        replacedCount++;
+                        modified = true;
+                    }
+                    continue;
+                }
+
+                WrappedBlockState state = WrappedBlockState.getByGlobalId(block.getBlockId());
+                StateType t = state != null ? state.getType() : StateTypes.AIR;
+                if (SmartFillEngine.isSafeTerrain(t)) continue; // already looks natural
+
+                // BUGFIX: see the matching comment in handleChunkData - never
+                // fill a position with no real solid roof above it.
+                if (smartFill.isOpenToSky(palette, block.getX() & 15, block.getZ() & 15, block.getY())) continue;
+
+                if (reveal != null && reveal.isAirRevealed(
+                        block.getX(), block.getY(), block.getZ(), playerId, pBX, pBY, pBZ)) {
+                    continue; // near/looked-at -> send the real block
+                }
+                int fillId = palette != null
+                        ? smartFill.selectId(palette, block.getX(), block.getY(), block.getZ())
+                        : smartFill.getDefaultState(worldName, block.getY()).getGlobalId();
+                block.setBlockId(fillId);
+                replacedCount++;
+                modified = true;
             }
 
             if (modified) {
                 event.markForReEncode(true);
                 plugin.addBlocksReplaced(replacedCount);
                 plugin.dbg("MULTI_BLOCK_CHANGE modified for " + player.getName()
-                        + " (" + replacedCount + " blocks)");
+                        + " (" + replacedCount + " blocks, smart-fill)");
             }
         } catch (Exception e) {
             plugin.dbg("MULTI_BLOCK_CHANGE error: " + e.getMessage());
@@ -436,14 +768,13 @@ public final class ChunkListener implements PacketListener {
     private void handleBlockEntityData(PacketSendEvent event, Player player) {
         plugin.incrementPacketsProcessed();
         try {
+            if (!plugin.isPieChartProtectionEnabled()) return;
             WrapperPlayServerBlockEntityData wrapper = new WrapperPlayServerBlockEntityData(event);
             Vector3i pos = wrapper.getPosition();
             if (pos == null) return;
 
-            if (cancelIfAtOrBelowVoidY(event, player, pos.getY())) {
-                plugin.dbg("BLOCK_ENTITY_DATA cancelled at " + pos
-                        + " (Y=" + pos.getY() + " ≤ voidY=" + plugin.getVoidY(player.getWorld().getName()) + ")"
-                        + " for " + player.getName());
+            if (cancelIfShouldHide(event, player, pos.getY(), pos.getX(), pos.getZ())) {
+                plugin.dbg("BLOCK_ENTITY_DATA cancelled at " + pos + " for " + player.getName());
             }
         } catch (Exception e) {
             plugin.dbg("BLOCK_ENTITY_DATA error: " + e.getMessage());
@@ -461,7 +792,7 @@ public final class ChunkListener implements PacketListener {
             Vector3i pos = wrapper.getBlockPosition();
             if (pos == null) return;
 
-            if (cancelIfAtOrBelowVoidY(event, player, pos.getY())) {
+            if (cancelIfShouldHide(event, player, pos.getY(), pos.getX(), pos.getZ())) {
                 plugin.dbg("BLOCK_ACTION cancelled at " + pos + " for " + player.getName());
             }
         } catch (Exception e) {
@@ -477,7 +808,7 @@ public final class ChunkListener implements PacketListener {
             Vector3i pos = wrapper.getPosition();
             if (pos == null) return;
 
-            if (cancelIfAtOrBelowVoidY(event, player, pos.getY())) {
+            if (cancelIfHiddenHardFloor(event, player, pos.getX(), pos.getY(), pos.getZ())) {
                 plugin.dbg("EFFECT cancelled at " + pos + " for " + player.getName());
             }
         } catch (Exception e) {
@@ -493,7 +824,11 @@ public final class ChunkListener implements PacketListener {
             Vector3i pos = wrapper.getEffectPosition();
             if (pos == null) return;
 
-            if (cancelIfAtOrBelowVoidY(event, player, pos.getY())) {
+            // The sound packet stores coordinates as fixed-point (block * 8).
+            int bx = Math.floorDiv(pos.getX(), 8);
+            int by = Math.floorDiv(pos.getY(), 8);
+            int bz = Math.floorDiv(pos.getZ(), 8);
+            if (cancelIfHiddenHardFloor(event, player, bx, by, bz)) {
                 plugin.dbg("SOUND_EFFECT cancelled at " + pos + " for " + player.getName());
             }
         } catch (Exception e) {
@@ -508,13 +843,13 @@ public final class ChunkListener implements PacketListener {
             WrapperPlayServerEntitySoundEffect wrapper = new WrapperPlayServerEntitySoundEffect(event);
             int entityId = wrapper.getEntityId();
 
-            // Look up cached Y instead of calling world.getEntities() on the Netty thread.
-            Integer cachedY = entityYCache.get(entityId);
-            if (cachedY == null) return; // unknown entity, let it through
+            // Look up the cached spawn position instead of calling world.getEntities() on the Netty thread.
+            int[] cached = entityYCache.get(entityId);
+            if (cached == null) return; // unknown entity, let it through
 
-            if (cancelIfAtOrBelowVoidY(event, player, cachedY)) {
+            if (cancelIfHiddenHardFloor(event, player, cached[0], cached[1], cached[2])) {
                 plugin.dbg("ENTITY_SOUND_EFFECT cancelled for entity #"
-                        + entityId + " at Y=" + cachedY
+                        + entityId + " at Y=" + cached[1]
                         + " for " + player.getName());
             }
         } catch (Exception e) {
@@ -530,7 +865,8 @@ public final class ChunkListener implements PacketListener {
             Vector3d pos = wrapper.getPosition();
             if (pos == null) return;
 
-            if (cancelIfAtOrBelowVoidY(event, player, (int) Math.floor(pos.getY()))) {
+            if (cancelIfHiddenHardFloor(event, player, (int) Math.floor(pos.getX()),
+                    (int) Math.floor(pos.getY()), (int) Math.floor(pos.getZ()))) {
                 plugin.dbg("PARTICLE cancelled at " + pos + " for " + player.getName());
             }
         } catch (Exception e) {
@@ -554,7 +890,7 @@ public final class ChunkListener implements PacketListener {
             if (wrapper.getEntityType() == EntityTypes.PLAYER) return;
             Vector3d pos = wrapper.getPosition();
             if (pos == null) return;
-            entityYCache.put(wrapper.getEntityId(), (int) Math.floor(pos.getY()));
+            entityYCache.put(wrapper.getEntityId(), blockPos(pos));
         } catch (Exception ignored) {}
     }
 
@@ -567,19 +903,20 @@ public final class ChunkListener implements PacketListener {
             Vector3d pos = wrapper.getPosition();
             if (pos == null) return;
 
-            int entityY = (int) Math.floor(pos.getY());
+            int[] entityPos = blockPos(pos);
+            int entityY = entityPos[1];
 
-            // Cache the entity's Y for later use by handleEntitySoundEffect.
+            // Cache the entity's position for later use by handleEntitySoundEffect.
             // This runs on the Netty thread where we already have the position
             // from the packet, so no Bukkit API calls are needed.
-            entityYCache.put(wrapper.getEntityId(), entityY);
+            entityYCache.put(wrapper.getEntityId(), entityPos);
 
             // BUGFIX: this cancellation was previously unconditional, ignoring
             // protection.pie-chart-protection entirely (same issue as the tile-entity
             // stripping above). Only cancel spawn packets when the setting is enabled.
             if (!plugin.isPieChartProtectionEnabled()) return;
 
-            if (cancelIfAtOrBelowVoidY(event, player, entityY)) {
+            if (cancelIfHiddenHardFloor(event, player, entityPos[0], entityY, entityPos[2])) {
                 plugin.dbg("SPAWN_ENTITY cancelled " + wrapper.getEntityType().getName()
                         + " at Y=" + entityY + " for " + player.getName());
             }
@@ -592,8 +929,104 @@ public final class ChunkListener implements PacketListener {
         return y <= plugin.getVoidY(player.getWorld().getName());
     }
 
+    /**
+     * BUGFIX: this used to only ever check against the hard void-y floor, so
+     * chest/door/particle/sound packets for a distant, still-hidden cave or
+     * base inside the Smart Fill camouflage band (void-y..ceiling-y) leaked
+     * straight through uncancelled — a player couldn't SEE the base through
+     * the fake stone, but could still hear a chest open or a redstone
+     * particle pop at its exact coordinates. This now checks the same
+     * hard-floor-or-camouflage-band logic as block masking, including the
+     * proximity/look reveal so a player's OWN nearby chests/doors still
+     * sound normal. When no X/Z is available for the packet (e.g. an entity
+     * sound that only carries a cached Y), it deliberately does NOT cancel
+     * inside the band — guessing wrong there would silence normal sounds for
+     * the player's own nearby entities, which is worse than the minor leak
+     * of an un-positioned sound.
+     */
+    private boolean shouldCancelForPosition(Player player, int y, Integer x, Integer z) {
+        int hardFloorY = plugin.getVoidY(player.getWorld().getName());
+        boolean smartFillEnabled = plugin.isSmartFillEnabled();
+
+        // IMPROVEMENT: shallow surface structures (PvP arenas, crystal
+        // holes, player-built rooms) are exempted entirely - see the
+        // matching comment in handleChunkData. Only meaningful in smart-fill
+        // mode with a known X/Z; legacy mode and un-positioned packets fall
+        // through to the existing logic below unchanged.
+        if (smartFillEnabled && x != null && z != null) {
+            String worldName = player.getWorld().getName();
+            SmartFillEngine.ColumnPalette palette = smartFill.getCachedPalette(worldName, x >> 4, z >> 4);
+            if (smartFill.isExemptSurfaceStructure(palette, x & 15, z & 15, y)) return false;
+        }
+
+        if (y <= hardFloorY) {
+            // BUGFIX: this was "no exceptions, ever" - that used to be safe
+            // because in legacy mode the hard floor was only ever masked
+            // while the player's OWN surface-triggered hidden state
+            // (fullProtection) was true, so a player actually down at/below
+            // the floor never had it applied to themselves. Smart Fill
+            // decoupled masking from that state entirely, so without this
+            // exception a player legitimately playing near/below void-y
+            // would have their own chest/door/redstone sounds silenced with
+            // no way to reveal them. Only smart-fill mode needs the
+            // proximity/look exception here - legacy mode is unaffected
+            // since it never reaches this method while the player is
+            // genuinely below the floor.
+            if (!smartFillEnabled || !plugin.isSmartFillActiveFor(player)) return true;
+            if (x == null || z == null) return true; // no position to localize, err hidden
+
+            SmartFillReveal hardFloorReveal = plugin.getSmartFillReveal();
+            if (hardFloorReveal == null) return true;
+
+            org.bukkit.Location hardFloorLoc = player.getLocation();
+            return !hardFloorReveal.isAirRevealed(x, y, z, player.getUniqueId(),
+                    hardFloorLoc.getBlockX(), hardFloorLoc.getBlockY(), hardFloorLoc.getBlockZ());
+        }
+
+        if (!smartFillEnabled) return false; // legacy mode never touches above void-y
+        if (!plugin.isSmartFillActiveFor(player)) return false;
+
+        int ceilingY = plugin.getSmartFillCeilingY();
+        if (y > ceilingY) return false;
+
+        if (x == null || z == null) return false; // no position to localize, don't guess
+
+        SmartFillReveal reveal = plugin.getSmartFillReveal();
+        if (reveal == null) return true; // reveal system unavailable, err hidden
+
+        org.bukkit.Location loc = player.getLocation();
+        return !reveal.isAirRevealed(x, y, z, player.getUniqueId(),
+                loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
+    }
+
     private boolean cancelIfAtOrBelowVoidY(PacketSendEvent event, Player player, int y) {
         if (!isAtOrBelowVoidY(player, y)) return false;
+        event.setCancelled(true);
+        return true;
+    }
+
+    /**
+     * Cancels effects/sounds/particles/entity spawns at or below void-y. In
+     * flat mode that only happens while the player's surface protection is
+     * on. In Smart Fill mode the player's own revealed surroundings are left
+     * alone, matching how hard-floor blocks are handled.
+     */
+    private boolean cancelIfHiddenHardFloor(PacketSendEvent event, Player player, int x, int y, int z) {
+        if (!isAtOrBelowVoidY(player, y)) return false;
+        if (!plugin.isSmartFillEnabled()) {
+            if (!plugin.isProtectionActive(player)) return false;
+            event.setCancelled(true);
+            return true;
+        }
+        return cancelIfShouldHide(event, player, y, x, z);
+    }
+
+    private static int[] blockPos(Vector3d pos) {
+        return new int[]{ (int) Math.floor(pos.getX()), (int) Math.floor(pos.getY()), (int) Math.floor(pos.getZ()) };
+    }
+
+    private boolean cancelIfShouldHide(PacketSendEvent event, Player player, int y, Integer x, Integer z) {
+        if (!shouldCancelForPosition(player, y, x, z)) return false;
         event.setCancelled(true);
         return true;
     }
@@ -611,6 +1044,7 @@ public final class ChunkListener implements PacketListener {
      */
     public void clearEntityCache() {
         entityYCache.clear();
+        smartFill.clearAll();
     }
 
     /**
@@ -618,5 +1052,12 @@ public final class ChunkListener implements PacketListener {
      */
     public int getEntityCacheSize() {
         return entityYCache.size();
+    }
+
+    /**
+     * Returns the total number of cached Smart Fill palettes across all worlds.
+     */
+    public int getSmartFillCacheSize() {
+        return smartFill.getCacheSize();
     }
 }

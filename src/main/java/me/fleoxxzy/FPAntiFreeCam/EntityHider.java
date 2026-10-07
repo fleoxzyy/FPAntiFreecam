@@ -69,7 +69,10 @@ public final class EntityHider implements Listener {
      * Shows or hides nearby underground entities accordingly.
      */
     public void updateFor(Player player) {
-        if (!enabled) return;
+        if (!enabled) {
+            showHiddenEntities(player); // un-hide anything left over from before hide-entities was turned off
+            return;
+        }
         if (main.isProtectionActive(player)) {
             hideUndergroundEntities(player);
         } else {

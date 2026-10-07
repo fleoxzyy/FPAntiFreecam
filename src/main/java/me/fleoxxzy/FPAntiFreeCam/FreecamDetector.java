@@ -86,7 +86,14 @@ public final class FreecamDetector implements Listener {
     private boolean alertsEnabled     = true;
     private String  alertMessage      = "&8[&cFreecam Alert&8] &e%player% &7was flagged for &cFreecam &7(&8%key%&7)";
 
-    private final List<ProbeKey>   probeKeys        = new ArrayList<>();
+    /**
+     * Translation keys from the Freecam mod's assets/freecam/lang/en_us.json
+     * and the text they resolve to. Compared case-insensitively.
+     */
+    private static final List<ProbeKey> PROBE_KEYS = List.of(
+            new ProbeKey("key.freecam.toggle", "Toggle Freecam"),
+            new ProbeKey("freecam.config.gui.title", "Freecam Options"),
+            new ProbeKey("key.category.freecam.controls", "Freecam"));
     private final List<String>     detectedCommands = new ArrayList<>();
 
     private final Map<UUID, PendingProbe> pendingProbes = new ConcurrentHashMap<>();
@@ -111,21 +118,12 @@ public final class FreecamDetector implements Listener {
         alertsEnabled     = cfg.getBoolean(base + "alerts-enabled", true);
         alertMessage      = cfg.getString(base + "alert-message", alertMessage);
 
-        probeKeys.clear();
-        List<Map<?, ?>> rawKeys = cfg.getMapList(base + "translation-keys");
-        for (Map<?, ?> entry : rawKeys) {
-            Object k = entry.get("key");
-            Object e = entry.get("expected");
-            if (k == null || e == null) continue;
-            probeKeys.add(new ProbeKey(k.toString(), e.toString()));
-        }
-
         detectedCommands.clear();
         detectedCommands.addAll(cfg.getStringList(base + "detected-commands"));
 
         if (debug) {
             plugin.getLogger().info("[FPAntiFreeCam] FreecamDetector loaded: enabled=" + enabled
-                    + " keys=" + probeKeys.size() + " (join-only probing)");
+                    + " keys=" + PROBE_KEYS.size() + " (join-only probing)");
         }
     }
 
@@ -155,7 +153,7 @@ public final class FreecamDetector implements Listener {
      * runs everywhere, independent of which worlds have void-hiding enabled.
      */
     public void scheduleJoinProbe(Player player) {
-        if (!enabled || probeKeys.isEmpty()) return;
+        if (!enabled) return;
         UUID id = player.getUniqueId();
         // 60 ticks (3s) gives the client time to finish loading in before we
         // pop a GUI open on them.
@@ -177,7 +175,7 @@ public final class FreecamDetector implements Listener {
     }
 
     private void probe(Player player) {
-        ProbeKey chosen = probeKeys.get(ThreadLocalRandom.current().nextInt(probeKeys.size()));
+        ProbeKey chosen = PROBE_KEYS.get(ThreadLocalRandom.current().nextInt(PROBE_KEYS.size()));
 
         PlatformUtil.runForEntity(plugin, player, () -> {
             if (!player.isOnline()) return;
