@@ -35,6 +35,16 @@ public final class BedrockSupport {
     // ── Initialisation ────────────────────────────────────────────────────
 
     private void init() {
+        // Reset: these are static, so a /fpac reload that re-constructs this
+        // class would otherwise keep stale "available" flags (and stale Method
+        // handles pointing at an old plugin classloader) from the last load.
+        geyserAvailable    = false;
+        floodgateAvailable = false;
+        geyserApi          = null;
+        floodgateApi       = null;
+        geyserIsBedrockMethod    = null;
+        floodgateIsBedrockMethod = null;
+
         // Try Geyser
         Plugin geyser = findPlugin("Geyser-Spigot", "Geyser");
         if (geyser != null && geyser.isEnabled()) {
@@ -64,7 +74,9 @@ public final class BedrockSupport {
         }
 
         if (!geyserAvailable && !floodgateAvailable) {
-            plugin.getLogger().info("[FPAntiFreeCam] Geyser/Floodgate not detected – Bedrock support disabled.");
+            plugin.getLogger().info("[FPAntiFreeCam] Geyser/Floodgate not detected – Bedrock support disabled."
+                    + " If Geyser runs on a proxy (BungeeCord/Velocity), install Floodgate on this"
+                    + " server too so Bedrock players can be recognised.");
         }
     }
 
@@ -91,10 +103,36 @@ public final class BedrockSupport {
         return result;
     }
 
-    /** Bedrock players get a slightly smaller chunk refresh radius to reduce lag. */
+    /**
+     * BUGFIX: this used to shrink the radius by one for Bedrock players.
+     * That never reduced the real load (the per-second Smart Fill refreshes
+     * were untouched) and it left the outermost ring of chunks un-refreshed,
+     * so Bedrock players could keep stale masked/unmasked chunks at the edge
+     * of their view. Instead, never refresh beyond what the Bedrock client
+     * can actually see: chunks past its view distance are wasted re-sends
+     * that Geyser still has to translate and push over the network.
+     */
     public int optimisedRadius(Player player, int defaultRadius) {
-        return isBedrock(player) ? Math.max(1, defaultRadius - 1) : defaultRadius;
+        if (!isBedrock(player)) return defaultRadius;
+        return Math.max(1, Math.min(defaultRadius, PlatformUtil.viewDistance(player)));
     }
+
+    /**
+     * Bedrock clients (via Geyser) rebuild every re-sent chunk from scratch
+     * and silently drop chunks when they receive large bursts of them, which
+     * shows up as chunks that randomly don't load. The continuous Smart Fill
+     * refresh tasks are therefore throttled harder for Bedrock players.
+     */
+    public long smartFillRefreshCooldownMs(Player player, long defaultMs) {
+        return isBedrock(player) ? Math.max(defaultMs, BEDROCK_SMART_FILL_COOLDOWN_MS) : defaultMs;
+    }
+
+    public int maxSightRefreshColumns(Player player, int defaultMax) {
+        return isBedrock(player) ? Math.min(defaultMax, BEDROCK_MAX_SIGHT_REFRESH_COLUMNS) : defaultMax;
+    }
+
+    private static final long BEDROCK_SMART_FILL_COOLDOWN_MS     = 4000L;
+    private static final int  BEDROCK_MAX_SIGHT_REFRESH_COLUMNS = 8;
 
     public void cleanupPlayer(UUID id) {
         bedrockCache.remove(id);

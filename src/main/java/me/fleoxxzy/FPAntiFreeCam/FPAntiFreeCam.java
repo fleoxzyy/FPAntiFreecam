@@ -40,6 +40,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -242,6 +243,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
     /** Max chunk columns one sight sweep may queue for refresh, so a huge newly visible cavern can't flood the refresh queue. */
     private static final int SMART_FILL_SIGHT_MAX_REFRESH_COLUMNS = 48;
+    /** Sight-sweep columns that were over the per-sweep cap, refreshed on the following sweeps. */
+    private final Map<UUID, Set<Long>> smartFillSightBacklog = new ConcurrentHashMap<>();
 
     private Set<String> protectedWorlds  = ConcurrentHashMap.newKeySet();
 
@@ -997,12 +1000,16 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         long now = System.currentTimeMillis();
         long cooldownUntil = smartFillRefreshCooldown.getOrDefault(id, 0L);
         if (now < cooldownUntil) return;
-        smartFillRefreshCooldown.put(id, now + SMART_FILL_REFRESH_COOLDOWN_MS);
+        long cooldownMs = bedrockSupport != null
+                ? bedrockSupport.smartFillRefreshCooldownMs(player, SMART_FILL_REFRESH_COOLDOWN_MS)
+                : SMART_FILL_REFRESH_COOLDOWN_MS;
+        smartFillRefreshCooldown.put(id, now + cooldownMs);
 
         // Sized off whichever is larger, revealRadius or lookDistance, so the
         // refreshed ring around the player's OWN position fully covers the
         // far end of the look cone too, not just the proximity sphere.
         int chunkRadius = (Math.max(revealRadius, lookDistance) / 16) + 2;
+        if (bedrockSupport != null) chunkRadius = bedrockSupport.optimisedRadius(player, chunkRadius);
         performRefresh(player, chunkRadius);
         dbg("Smart Fill proximity refresh for " + player.getName() + " (chunkRadius=" + chunkRadius + ")");
     }
@@ -1034,6 +1041,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (smartFillReveal == null) return;
         if (!isSmartFillActiveFor(player)) {
             smartFillReveal.clearSight(player.getUniqueId());
+            smartFillSightBacklog.remove(player.getUniqueId());
             return;
         }
         Set<Long> columns;
@@ -1043,11 +1051,24 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             dbg("Smart Fill sight sweep failed for " + player.getName() + ": " + e.getMessage());
             return;
         }
-        if (columns.isEmpty()) return;
+        if (columns.isEmpty() && !smartFillSightBacklog.containsKey(player.getUniqueId())) return;
+
+        // Columns cut by the cap on earlier sweeps: computeLineOfSight only
+        // reports NEWLY visible sections, so without carrying these over they
+        // would never be refreshed and would keep showing fake terrain.
+        Set<Long> backlog = smartFillSightBacklog.remove(player.getUniqueId());
+        if (backlog != null) {
+            Set<Long> merged = new HashSet<>(backlog);
+            merged.addAll(columns);
+            columns = merged;
+        }
 
         Collection<Long> toRefresh = columns;
-        if (columns.size() > SMART_FILL_SIGHT_MAX_REFRESH_COLUMNS) {
-            // Keep the columns nearest the player; the rest follow on later sweeps as they stay in sight.
+        int maxColumns = bedrockSupport != null
+                ? bedrockSupport.maxSightRefreshColumns(player, SMART_FILL_SIGHT_MAX_REFRESH_COLUMNS)
+                : SMART_FILL_SIGHT_MAX_REFRESH_COLUMNS;
+        if (columns.size() > maxColumns) {
+            // Keep the columns nearest the player; the rest are deferred to later sweeps.
             int pcx = player.getLocation().getBlockX() >> 4;
             int pcz = player.getLocation().getBlockZ() >> 4;
             toRefresh = columns.stream()
@@ -1055,8 +1076,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                         long dx = (int) (k >> 32) - pcx, dz = (int) (long) k - pcz;
                         return dx * dx + dz * dz;
                     }))
-                    .limit(SMART_FILL_SIGHT_MAX_REFRESH_COLUMNS)
+                    .limit(maxColumns)
                     .collect(Collectors.toList());
+            Set<Long> deferred = new HashSet<>(columns);
+            deferred.removeAll(toRefresh);
+            if (!deferred.isEmpty()) smartFillSightBacklog.put(player.getUniqueId(), deferred);
         }
 
         if (foliaScheduler != null) {
@@ -1228,6 +1252,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (smartFillReveal != null) smartFillReveal.cleanupPlayer(id);
         smartFillLastChunkKey.remove(id);
         smartFillRefreshCooldown.remove(id);
+        smartFillSightBacklog.remove(id);
         smartFillDisarmedForRelog.remove(id);
         dbg("Cleaned up quit player: " + event.getPlayer().getName());
     }

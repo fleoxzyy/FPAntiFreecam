@@ -8,6 +8,7 @@ import org.bukkit.plugin.Plugin;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -23,6 +24,8 @@ public final class FoliaScheduler {
 
     private final Plugin          plugin;
     private final Map<UUID, Long> lastRefreshTime = new ConcurrentHashMap<>();
+    /** Chunks already scheduled for refresh, so overlapping requests don't re-send the same chunk. */
+    private final Set<String>     pending         = ConcurrentHashMap.newKeySet();
 
     public FoliaScheduler(Plugin plugin) {
         this.plugin = plugin;
@@ -46,18 +49,11 @@ public final class FoliaScheduler {
         Map<String, Queue<ChunkTask>> byRegion = new ConcurrentHashMap<>();
         for (int cx = px - radiusChunks; cx <= px + radiusChunks; cx++) {
             for (int cz = pz - radiusChunks; cz <= pz + radiusChunks; cz++) {
-                Location chunkLoc = new Location(world, cx * 16.0, loc.getY(), cz * 16.0);
-                String   key      = regionKey(chunkLoc);
-                byRegion.computeIfAbsent(key, k -> new ConcurrentLinkedQueue<>())
-                        .offer(new ChunkTask(world, cx, cz, chunkLoc));
+                addTask(byRegion, world, cx, cz, loc.getY());
             }
         }
 
-        for (Queue<ChunkTask> tasks : byRegion.values()) {
-            ChunkTask first = tasks.peek();
-            if (first != null) scheduleRegion(first.loc, tasks);
-        }
-
+        scheduleAll(byRegion);
         lastRefreshTime.put(id, now);
     }
 
@@ -74,16 +70,9 @@ public final class FoliaScheduler {
 
         Map<String, Queue<ChunkTask>> byRegion = new ConcurrentHashMap<>();
         for (long key : columnKeys) {
-            int cx = (int) (key >> 32);
-            int cz = (int) key;
-            Location chunkLoc = new Location(world, cx * 16.0, loc.getY(), cz * 16.0);
-            byRegion.computeIfAbsent(regionKey(chunkLoc), k -> new ConcurrentLinkedQueue<>())
-                    .offer(new ChunkTask(world, cx, cz, chunkLoc));
+            addTask(byRegion, world, (int) (key >> 32), (int) key, loc.getY());
         }
-        for (Queue<ChunkTask> tasks : byRegion.values()) {
-            ChunkTask first = tasks.peek();
-            if (first != null) scheduleRegion(first.loc, tasks);
-        }
+        scheduleAll(byRegion);
     }
 
     public void cleanupPlayer(UUID id) {
@@ -91,7 +80,7 @@ public final class FoliaScheduler {
     }
 
     public String stats() {
-        return "tracked-players:" + lastRefreshTime.size();
+        return "tracked-players:" + lastRefreshTime.size() + "  pending:" + pending.size();
     }
 
     public static boolean shouldUse() {
@@ -101,6 +90,19 @@ public final class FoliaScheduler {
     }
 
     // ── Internal ─────────────────────────────────────────────────────────
+
+    private void addTask(Map<String, Queue<ChunkTask>> byRegion, World world, int cx, int cz, double y) {
+        ChunkTask task = new ChunkTask(world, cx, cz, new Location(world, cx * 16.0, y, cz * 16.0));
+        if (!pending.add(task.key)) return;
+        byRegion.computeIfAbsent(regionKey(task.loc), k -> new ConcurrentLinkedQueue<>()).offer(task);
+    }
+
+    private void scheduleAll(Map<String, Queue<ChunkTask>> byRegion) {
+        for (Queue<ChunkTask> tasks : byRegion.values()) {
+            ChunkTask first = tasks.peek();
+            if (first != null) scheduleRegion(first.loc, tasks);
+        }
+    }
 
     private void scheduleRegion(Location regionLoc, Queue<ChunkTask> tasks) {
         PlatformUtil.runTask(plugin, regionLoc, () -> {
@@ -112,6 +114,7 @@ public final class FoliaScheduler {
                     tasks.offer(t);
                     break;
                 }
+                pending.remove(t.key);
                 try {
                     t.world.refreshChunk(t.cx, t.cz);
                     processed++;
@@ -138,12 +141,14 @@ public final class FoliaScheduler {
         final World    world;
         final int      cx, cz;
         final Location loc;
+        final String   key;
 
         ChunkTask(World world, int cx, int cz, Location loc) {
             this.world = world;
             this.cx    = cx;
             this.cz    = cz;
             this.loc   = loc;
+            this.key   = world.getUID() + ":" + cx + ":" + cz;
         }
     }
 }

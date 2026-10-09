@@ -9,6 +9,7 @@ import org.bukkit.scheduler.BukkitTask;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -26,6 +27,8 @@ public final class PaperScheduler {
     private       int                 maxPerTick      = 40;
     private final Map<UUID, Long>     lastRefreshTime = new ConcurrentHashMap<>();
     private final Queue<ChunkTask>    queue           = new ConcurrentLinkedQueue<>();
+    /** Chunks already waiting in the queue, so overlapping refresh requests don't re-send the same chunk. */
+    private final Set<String>         pending         = ConcurrentHashMap.newKeySet();
     private       BukkitTask          drainTask;
 
     public PaperScheduler(Plugin plugin) {
@@ -58,7 +61,7 @@ public final class PaperScheduler {
             for (int cx = px - r; cx <= px + r; cx++) {
                 for (int cz = pz - r; cz <= pz + r; cz++) {
                     if (Math.abs(cx - px) == r || Math.abs(cz - pz) == r) {
-                        queue.offer(new ChunkTask(world, cx, cz, id, r));
+                        enqueue(new ChunkTask(world, cx, cz, id, r));
                     }
                 }
             }
@@ -76,19 +79,28 @@ public final class PaperScheduler {
         if (world == null) return;
         UUID id = player.getUniqueId();
         for (long key : columnKeys) {
-            queue.offer(new ChunkTask(world, (int) (key >> 32), (int) key, id, 0));
+            enqueue(new ChunkTask(world, (int) (key >> 32), (int) key, id, 0));
         }
     }
 
     public void cleanupPlayer(UUID id) {
         lastRefreshTime.remove(id);
-        queue.removeIf(t -> t.playerId.equals(id));
+        queue.removeIf(t -> {
+            if (!t.playerId.equals(id)) return false;
+            pending.remove(t.key);
+            return true;
+        });
     }
 
     public void shutdown() {
         if (drainTask != null && !drainTask.isCancelled()) drainTask.cancel();
         queue.clear();
+        pending.clear();
         lastRefreshTime.clear();
+    }
+
+    private void enqueue(ChunkTask task) {
+        if (pending.add(task.key)) queue.offer(task);
     }
 
     public String stats() {
@@ -110,6 +122,7 @@ public final class PaperScheduler {
         while (!queue.isEmpty() && processed < maxPerTick) {
             ChunkTask t = queue.poll();
             if (t == null) break;
+            pending.remove(t.key);
             try {
                 Player p = Bukkit.getPlayer(t.playerId);
                 if (p != null && p.isOnline()
@@ -133,9 +146,11 @@ public final class PaperScheduler {
         final UUID  playerId;
         /** Ring distance from player – used for priority ordering. */
         final int   ring;
+        final String key;
         ChunkTask(World world, int cx, int cz, UUID playerId, int ring) {
             this.world = world; this.cx = cx; this.cz = cz;
             this.playerId = playerId; this.ring = ring;
+            this.key = world.getUID() + ":" + cx + ":" + cz;
         }
     }
 }
