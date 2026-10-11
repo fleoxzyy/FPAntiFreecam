@@ -227,6 +227,11 @@ public final class SmartFillReveal {
         }
     }
 
+    /** Last cached (normalized) look vector for a player, or null if none yet. */
+    public Vector getLookVector(UUID playerId) {
+        return playerId != null ? playerLookVectors.get(playerId) : null;
+    }
+
     /**
      * Sweeps evenly spread rays from the player's eye through see-through
      * blocks and records every chunk section a ray passes through, so a

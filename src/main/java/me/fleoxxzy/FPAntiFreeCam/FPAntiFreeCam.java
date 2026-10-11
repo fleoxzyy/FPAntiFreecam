@@ -977,7 +977,10 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
      * half-second on a spinning camera.
      */
     private void maybeRefreshSmartFillProximity(Player player) {
-        if (!isSmartFillActiveFor(player)) return;
+        if (!isSmartFillActiveFor(player)) {
+            if (chunkListener != null) chunkListener.cleanupPlayer(player.getUniqueId());
+            return;
+        }
         UUID id = player.getUniqueId();
         Location loc = player.getLocation();
         long posChunkKey = (((long) (loc.getBlockX() >> 4)) << 32) ^ (loc.getBlockZ() >> 4);
@@ -1013,8 +1016,39 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         // far end of the look cone too, not just the proximity sphere.
         int chunkRadius = (Math.max(revealRadius, lookDistance) / 16) + 2;
         if (bedrockSupport != null) chunkRadius = bedrockSupport.optimisedRadius(player, chunkRadius);
-        performRefresh(player, chunkRadius);
-        dbg("Smart Fill proximity refresh for " + player.getName() + " (chunkRadius=" + chunkRadius + ")");
+
+        // BUGFIX (Bedrock chunk reloading): this used to re-send EVERY chunk in
+        // the radius (~121 chunks) each time it fired. Most of those had
+        // nothing masked in them, or nothing that the new position/look
+        // direction would reveal, so the re-send changed nothing - but Geyser
+        // rebuilds every re-sent chunk from scratch on Bedrock, which showed up
+        // as the whole area visibly reloading every second or two. Only chunks
+        // where the client still has fake blocks that would now be revealed
+        // are refreshed.
+        List<Long> toRefresh = new ArrayList<>();
+        if (chunkListener != null) {
+            int pcx = loc.getBlockX() >> 4;
+            int pcz = loc.getBlockZ() >> 4;
+            for (int cx = pcx - chunkRadius; cx <= pcx + chunkRadius; cx++) {
+                for (int cz = pcz - chunkRadius; cz <= pcz + chunkRadius; cz++) {
+                    if (chunkListener.shouldRefreshForReveal(player, cx, cz)) {
+                        toRefresh.add(((long) cx << 32) | (cz & 0xFFFFFFFFL));
+                    }
+                }
+            }
+        }
+        if (toRefresh.isEmpty()) return;
+        refreshColumns(player, toRefresh);
+        dbg("Smart Fill proximity refresh for " + player.getName() + " (" + toRefresh.size()
+                + " chunks, radius=" + chunkRadius + ")");
+    }
+
+    private void refreshColumns(Player player, Collection<Long> columns) {
+        if (foliaScheduler != null) {
+            foliaScheduler.refreshColumns(player, columns);
+        } else if (paperScheduler != null) {
+            paperScheduler.refreshColumns(player, columns);
+        }
     }
 
     /**
@@ -1065,6 +1099,19 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             merged.addAll(columns);
             columns = merged;
         }
+
+        // BUGFIX (Bedrock chunk reloading): skip columns the client has no
+        // fake blocks in - re-sending those changes nothing but still makes
+        // Geyser rebuild the chunk on Bedrock, which shows as a reload.
+        if (chunkListener != null) {
+            UUID pid = player.getUniqueId();
+            Set<Long> filtered = new HashSet<>();
+            for (long k : columns) {
+                if (chunkListener.hasMaskedBlocks(pid, (int) (k >> 32), (int) k)) filtered.add(k);
+            }
+            columns = filtered;
+        }
+        if (columns.isEmpty()) return;
 
         Collection<Long> toRefresh = columns;
         int maxColumns = bedrockSupport != null
@@ -1253,6 +1300,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (entityHider     != null) entityHider.cleanupPlayer(id);
         if (freecamDetector != null) freecamDetector.cleanupPlayer(id);
         if (smartFillReveal != null) smartFillReveal.cleanupPlayer(id);
+        if (chunkListener   != null) chunkListener.cleanupPlayer(id);
         smartFillLastChunkKey.remove(id);
         smartFillRefreshCooldown.remove(id);
         smartFillSightBacklog.remove(id);

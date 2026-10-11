@@ -24,6 +24,7 @@ import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerMu
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerParticle;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSoundEffect;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSpawnEntity;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerUnloadChunk;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.entity.Entity;
@@ -83,6 +84,41 @@ public final class ChunkListener implements PacketListener {
     private final Map<Integer, int[]> entityYCache = new ConcurrentHashMap<>();
 
     /**
+     * Per-player record of which chunk sections were actually sent with
+     * Smart Fill blocks in them, keyed by {@code (cx << 32) | (cz & 0xFFFFFFFFL)}.
+     *
+     * BUGFIX (Bedrock): Geyser turns every chunk re-send into a full chunk
+     * rebuild on the Bedrock client, which shows as a visible reload. The
+     * Smart Fill refresh tasks used to re-send chunks that had nothing masked
+     * in them at all (open sky, oceans, solid rock), so Bedrock players saw
+     * chunks reloading every second or two. Refreshes are now limited to
+     * chunks this map says the client still has fake blocks in.
+     */
+    private final Map<UUID, Map<Long, MaskedChunk>> maskedChunks = new ConcurrentHashMap<>();
+
+    private static final class MaskedChunk {
+        /** Bit i = section (minSection + i) contains filled blocks; bit 63 also covers any higher section. */
+        final long sections;
+        final int  minSection;
+        /** Player block position and look direction when the chunk was masked. */
+        final int  px, py, pz;
+        final double lx, ly, lz;
+
+        MaskedChunk(long sections, int minSection, int px, int py, int pz, double lx, double ly, double lz) {
+            this.sections = sections;
+            this.minSection = minSection;
+            this.px = px; this.py = py; this.pz = pz;
+            this.lx = lx; this.ly = ly; this.lz = lz;
+        }
+
+        boolean has(int sectionY) {
+            int idx = sectionY - minSection;
+            if (idx < 0) return false;
+            return (sections & (1L << Math.min(idx, 63))) != 0;
+        }
+    }
+
+    /**
      * PERF: Set of packet types that this listener actually handles.
      * Checked BEFORE any Bukkit API calls (getPlayer, getWorld, hasPermission)
      * so that the ~90% of outbound packets we don't care about (chat, tab list,
@@ -105,6 +141,9 @@ public final class ChunkListener implements PacketListener {
         s.add(PacketType.Play.Server.SPAWN_LIVING_ENTITY);
         s.add(PacketType.Play.Server.SPAWN_EXPERIENCE_ORB);
         s.add(PacketType.Play.Server.SPAWN_PAINTING);
+        s.add(PacketType.Play.Server.UNLOAD_CHUNK);
+        s.add(PacketType.Play.Server.RESPAWN);
+        s.add(PacketType.Play.Server.JOIN_GAME);
         HANDLED_TYPES = s;
     }
 
@@ -177,6 +216,19 @@ public final class ChunkListener implements PacketListener {
 
         UUID uuid = user.getUUID();
         if (uuid == null) return;
+
+        // Client-side chunk lifecycle: keep the masked-chunk record in sync.
+        if (type == PacketType.Play.Server.UNLOAD_CHUNK) {
+            try {
+                WrapperPlayServerUnloadChunk unload = new WrapperPlayServerUnloadChunk(event);
+                forgetChunk(uuid, unload.getChunkX(), unload.getChunkZ());
+            } catch (Exception ignored) {}
+            return;
+        }
+        if (type == PacketType.Play.Server.RESPAWN || type == PacketType.Play.Server.JOIN_GAME) {
+            maskedChunks.remove(uuid); // client drops every chunk on respawn/world change
+            return;
+        }
 
         Player player = Bukkit.getPlayer(uuid);
         if (player == null || !player.isOnline()) return;
@@ -360,6 +412,7 @@ public final class ChunkListener implements PacketListener {
 
         boolean modified      = false;
         long    replacedCount = 0;
+        long    maskedBits    = 0;
 
         for (int si = 0; si < sections.length; si++) {
             BaseChunk section = sections[si];
@@ -367,6 +420,7 @@ public final class ChunkListener implements PacketListener {
 
             int sectionBaseY = minY + si * 16;
             if (sectionBaseY > ceilingY) continue;
+            long replacedBefore = replacedCount;
 
             for (int ly = 0; ly < 16; ly++) {
                 int worldY = sectionBaseY + ly;
@@ -466,12 +520,15 @@ public final class ChunkListener implements PacketListener {
                     }
                 }
             }
+            if (replacedCount != replacedBefore) maskedBits |= 1L << Math.min(si, 63);
         }
 
         if (plugin.isPieChartProtectionEnabled() && column != null) {
             boolean tileModified = stripTileEntitiesBelow(column, ceilingY, true, reveal, playerId);
             if (tileModified) modified = true;
         }
+
+        recordMaskedChunk(playerId, chunkX, chunkZ, maskedBits, minY >> 4, pBX, pBY, pBZ);
 
         if (modified) {
             try { wrapper.setIgnoreOldData(true); } catch (Exception ignored) {}
@@ -1045,6 +1102,122 @@ public final class ChunkListener implements PacketListener {
     public void removeEntityFromCache(int entityId) {
         entityYCache.remove(entityId);
     }
+
+    // ── Masked-chunk tracking (used to skip no-op chunk refreshes) ─────────
+
+    private void recordMaskedChunk(UUID playerId, int cx, int cz, long bits, int minSection,
+                                   int px, int py, int pz) {
+        long key = columnKey(cx, cz);
+        if (bits == 0) {
+            Map<Long, MaskedChunk> m = maskedChunks.get(playerId);
+            if (m != null) m.remove(key);
+            return;
+        }
+        SmartFillReveal reveal = plugin.getSmartFillReveal();
+        org.bukkit.util.Vector look = reveal != null ? reveal.getLookVector(playerId) : null;
+        maskedChunks.computeIfAbsent(playerId, k -> new ConcurrentHashMap<>())
+                .put(key, new MaskedChunk(bits, minSection, px, py, pz,
+                        look != null ? look.getX() : 0, look != null ? look.getY() : 0, look != null ? look.getZ() : 0));
+    }
+
+    private void forgetChunk(UUID playerId, int cx, int cz) {
+        Map<Long, MaskedChunk> m = maskedChunks.get(playerId);
+        if (m != null) m.remove(columnKey(cx, cz));
+    }
+
+    private static long columnKey(int cx, int cz) {
+        return ((long) cx << 32) | (cz & 0xFFFFFFFFL);
+    }
+
+    /** True if the client was sent this chunk with any Smart Fill blocks still in it. */
+    public boolean hasMaskedBlocks(UUID playerId, int cx, int cz) {
+        Map<Long, MaskedChunk> m = maskedChunks.get(playerId);
+        return m != null && m.containsKey(columnKey(cx, cz));
+    }
+
+    /**
+     * Decides whether re-sending this chunk would actually show the player
+     * something new: the client must still have fake blocks in it, one of
+     * those masked sections must now fall inside the reveal sphere, the look
+     * cone or the line of sight, and the player must have moved or turned
+     * since the chunk was last masked (otherwise the re-send would produce
+     * the exact same chunk and just cause a visible reload, especially on
+     * Bedrock where Geyser rebuilds every re-sent chunk from scratch).
+     */
+    public boolean shouldRefreshForReveal(Player player, int cx, int cz) {
+        UUID id = player.getUniqueId();
+        Map<Long, MaskedChunk> m = maskedChunks.get(id);
+        if (m == null) return false;
+        MaskedChunk mc = m.get(columnKey(cx, cz));
+        if (mc == null) return false;
+
+        SmartFillReveal reveal = plugin.getSmartFillReveal();
+        if (reveal == null) return false;
+
+        org.bukkit.Location loc = player.getLocation();
+        int px = loc.getBlockX(), py = loc.getBlockY(), pz = loc.getBlockZ();
+        org.bukkit.util.Vector look = reveal.getLookVector(id);
+
+        int mdx = px - mc.px, mdy = py - mc.py, mdz = pz - mc.pz;
+        boolean moved = mdx * mdx + mdy * mdy + mdz * mdz >= REVEAL_REFRESH_MOVE_SQ;
+        boolean turned = look != null
+                && look.getX() * mc.lx + look.getY() * mc.ly + look.getZ() * mc.lz < REVEAL_REFRESH_TURN_DOT;
+        if (!moved && !turned) return false;
+
+        int revealRadius = reveal.getRevealRadius();
+        int lookDistance = reveal.getLookDistance();
+        int lookReach = lookDistance + 14;
+        int lookReachSq = lookReach * lookReach;
+
+        int minX = cx << 4, minZ = cz << 4;
+        for (int i = 0; i < 64; i++) {
+            if ((mc.sections & (1L << i)) == 0) continue;
+            int sy = mc.minSection + i;
+            int minY = sy << 4;
+
+            // Reveal sphere: only refresh when the player got meaningfully
+            // closer to a masked section that's now within the sphere, i.e.
+            // the re-send would actually reveal blocks it didn't before.
+            double nowDist  = Math.sqrt(nearestSq(minX, minY, minZ, px, py, pz));
+            if (nowDist <= revealRadius) {
+                double thenDist = Math.sqrt(nearestSq(minX, minY, minZ, mc.px, mc.py, mc.pz));
+                if (thenDist - nowDist >= REVEAL_REFRESH_CLOSER_BLOCKS) return true;
+            }
+
+            // Look cone: section is in the cone now but wasn't when masked.
+            if (look != null && inCone(minX + 8 - px, minY + 8 - py, minZ + 8 - pz,
+                    look.getX(), look.getY(), look.getZ(), lookReachSq)
+                    && !inCone(minX + 8 - mc.px, minY + 8 - mc.py, minZ + 8 - mc.pz,
+                    mc.lx, mc.ly, mc.lz, lookReachSq)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int nearestSq(int minX, int minY, int minZ, int px, int py, int pz) {
+        int nx = Math.max(minX, Math.min(px, minX + 15)) - px;
+        int ny = Math.max(minY, Math.min(py, minY + 15)) - py;
+        int nz = Math.max(minZ, Math.min(pz, minZ + 15)) - pz;
+        return nx * nx + ny * ny + nz * nz;
+    }
+
+    private static boolean inCone(double dx, double dy, double dz,
+                                  double lx, double ly, double lz, int maxDistSq) {
+        double distSq = dx * dx + dy * dy + dz * dz;
+        if (distSq <= 0 || distSq > maxDistSq) return false;
+        double dot = dx * lx + dy * ly + dz * lz;
+        return dot > 0 && (dot * dot) / distSq >= 0.55;
+    }
+
+    /** Drops all per-player tracking (call on quit). */
+    public void cleanupPlayer(UUID id) {
+        maskedChunks.remove(id);
+    }
+
+    private static final int    REVEAL_REFRESH_MOVE_SQ  = 4 * 4;
+    private static final double REVEAL_REFRESH_TURN_DOT = 0.9; // ~25 degrees
+    private static final double REVEAL_REFRESH_CLOSER_BLOCKS = 4.0;
 
     /**
      * Clears the entire entity Y cache. Call on plugin disable or reload.
