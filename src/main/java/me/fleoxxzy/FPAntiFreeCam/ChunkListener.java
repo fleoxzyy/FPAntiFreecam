@@ -134,17 +134,24 @@ public final class ChunkListener implements PacketListener {
      * map for the lifetime of the server even after despawning. On a server
      * with active farms or heavy natural spawning this grew unbounded.
      *
-     * A direct EntityRemoveFromWorldEvent hook would be ideal, but that
-     * class isn't available in the paper-api version this project compiles
-     * against (added in a later Paper API than 1.19.4), so instead this is
+     * Paper servers (including Folia) evict entries per-entity through
+     * {@link EntityRemoveListener}. This method is the fallback for Spigot: it's
      * called periodically from FPAntiFreeCam's existing 60s cleanup task and
      * cross-checks every cached ID against the set of currently-loaded
      * entities across all worlds, dropping anything no longer present.
      * MUST be called on the main/global thread — World#getEntities() is not
      * thread-safe off it.
+     *
+     * BUGFIX (Folia): there is no single "main thread" on Folia — every entity
+     * belongs to a region thread, and calling getEntityId() on it from the
+     * global region scheduler throws "Accessing entity state off owning
+     * region's thread". On Folia this scan is skipped entirely; eviction is
+     * handled per-entity by {@link EntityRemoveListener} instead, which runs
+     * on the entity's own region thread.
      */
     public void pruneStaleCache() {
         if (entityYCache.isEmpty()) return;
+        if (PlatformUtil.isFolia()) return;
         Set<Integer> liveIds = new HashSet<>();
         for (World world : Bukkit.getWorlds()) {
             for (Entity e : world.getEntities()) {

@@ -252,6 +252,29 @@ public final class PlatformUtil {
         Bukkit.getScheduler().runTask(plugin, task);
     }
 
+    /**
+     * Like {@link #runForEntity}, but with a {@code retired} callback that runs if
+     * the entity is removed before the task executes. Returns false if the entity
+     * was already retired (removed) at scheduling time, in which case neither
+     * callback runs. Safe to call from any thread, including Folia's global region.
+     * On non-Folia platforms the task is simply run on the main thread.
+     */
+    public static boolean runForEntity(Plugin plugin, org.bukkit.entity.Entity entity, Runnable task, Runnable retired) {
+        if (!plugin.isEnabled()) { task.run(); return true; }
+        if (isFolia() && entityGetScheduler != null && entitySchedulerRun != null) {
+            try {
+                Object scheduler = entityGetScheduler.invoke(entity);
+                if (scheduler == null) return false;
+                return entitySchedulerRun.invoke(scheduler, plugin, (Consumer<Object>) st -> task.run(), retired) != null;
+            } catch (Exception e) {
+                plugin.getLogger().warning("[FPAntiFreeCam] Folia EntityScheduler failed: " + e.getMessage());
+                return true;
+            }
+        }
+        runTask(plugin, task);
+        return true;
+    }
+
     /** Schedule a delayed task (global/main thread). */
     public static BukkitTask runTaskLater(Plugin plugin, Runnable task, long delayTicks) {
         // See runTask() above for why this guard exists.

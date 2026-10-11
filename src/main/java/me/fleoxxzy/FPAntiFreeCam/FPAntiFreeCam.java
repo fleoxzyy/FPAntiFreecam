@@ -362,6 +362,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         // Do NOT call api.init() — the standalone PacketEvents plugin handles this.
 
         getServer().getPluginManager().registerEvents(this, this);
+        if (EntityRemoveListener.isSupported()) {
+            getServer().getPluginManager().registerEvents(new EntityRemoveListener(chunkListener), this);
+        }
         registerCommands();
 
         enabledAt = System.currentTimeMillis();

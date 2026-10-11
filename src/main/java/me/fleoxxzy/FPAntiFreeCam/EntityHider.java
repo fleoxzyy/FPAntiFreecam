@@ -157,6 +157,10 @@ public final class EntityHider implements Listener {
      * (despawned, removed). Should be called periodically (e.g. every 30 s).
      */
     public void periodicCleanup() {
+        if (PlatformUtil.isFolia()) {
+            periodicCleanupFolia();
+            return;
+        }
         hidden.removeIf(key -> {
             String[] parts = key.split(":", 2);
             if (parts.length < 2) return true; // malformed
@@ -168,6 +172,33 @@ public final class EntityHider implements Listener {
                 return true; // bad UUID, drop it
             }
         });
+    }
+
+    /**
+     * BUGFIX (Folia): this cleanup runs on the global region thread, but
+     * Entity#isValid() may only be called from the entity's owning region
+     * thread. Each validity check is therefore dispatched onto that entity's
+     * own scheduler. Entities that are already removed are detected via the
+     * scheduler's retired state and dropped immediately.
+     */
+    private void periodicCleanupFolia() {
+        for (String key : new ArrayList<>(hidden)) {
+            String[] parts = key.split(":", 2);
+            if (parts.length < 2) { hidden.remove(key); continue; }
+            Entity e;
+            try {
+                e = Bukkit.getEntity(UUID.fromString(parts[1]));
+            } catch (IllegalArgumentException ex) {
+                hidden.remove(key);
+                continue;
+            }
+            if (e == null) { hidden.remove(key); continue; }
+            Entity entity = e;
+            boolean scheduled = PlatformUtil.runForEntity(plugin, entity,
+                    () -> { if (!entity.isValid()) hidden.remove(key); },
+                    () -> hidden.remove(key));
+            if (!scheduled) hidden.remove(key);
+        }
     }
 
     public String stats() {
