@@ -5,7 +5,7 @@
 # ─────────────────────────────────────────────────────────────────────
 
 # Do not change this manually.
-config-version: 5.1
+config-version: 5.2
 
 # ── General ──────────────────────────────────────────────────────────
 settings:
@@ -107,6 +107,11 @@ replacement:
     # Keep hiding distant caves while players are underground, not only
     # while protection is on at the surface.
     always-on: true
+
+    # Use plain hiding (below void-y) for Bedrock players instead of Smart
+    # Fill. Smart Fill re-sends chunks as players move, which Bedrock
+    # (Geyser) shows as glitchy chunk reloads. Needs Geyser or Floodgate.
+    disable-for-bedrock: true
 
     # Top Y of the area Smart Fill hides. Defaults to protection-y.
     # ceiling-y: 64

@@ -248,7 +248,7 @@ public final class ChunkListener implements PacketListener {
             return;
         }
 
-        if (!plugin.isProtectionActive(player) && !(plugin.isSmartFillEnabled() && plugin.isSmartFillActiveFor(player))) {
+        if (!plugin.isProtectionActive(player) && !plugin.isSmartFillActiveFor(player)) {
             // Still cache entity Y even when nothing needs hiding right now
             if (isSpawnPacket) cacheEntitySpawnY(event);
             return;
@@ -315,7 +315,7 @@ public final class ChunkListener implements PacketListener {
         String worldName     = world.getName();
         int    hardFloorY    = plugin.getVoidY(worldName); // absolute, always-hidden vault floor
         int    replacementId = plugin.getReplacementBlockId();
-        boolean smartFillEnabled = plugin.isSmartFillEnabled();
+        boolean smartFillEnabled = plugin.isSmartFillEnabledFor(player);
 
         // BUGFIX: "useSmartFill" and the surface-triggered playerHiddenState
         // used to be the SAME on/off switch, and the masked range never went
@@ -607,7 +607,7 @@ public final class ChunkListener implements PacketListener {
 
             String worldName = player.getWorld().getName();
             int hardFloorY = plugin.getVoidY(worldName);
-            boolean smartFillEnabled = plugin.isSmartFillEnabled();
+            boolean smartFillEnabled = plugin.isSmartFillEnabledFor(player);
 
             if (!smartFillEnabled) {
                 // Legacy flat mode
@@ -715,7 +715,7 @@ public final class ChunkListener implements PacketListener {
             String  worldName     = player.getWorld().getName();
             int     hardFloorY    = plugin.getVoidY(worldName);
             int     replacementId = plugin.getReplacementBlockId();
-            boolean smartFillEnabled = plugin.isSmartFillEnabled();
+            boolean smartFillEnabled = plugin.isSmartFillEnabledFor(player);
 
             boolean modified      = false;
             int     replacedCount = 0;
@@ -1010,7 +1010,7 @@ public final class ChunkListener implements PacketListener {
      */
     private boolean shouldCancelForPosition(Player player, int y, Integer x, Integer z) {
         int hardFloorY = plugin.getVoidY(player.getWorld().getName());
-        boolean smartFillEnabled = plugin.isSmartFillEnabled();
+        boolean smartFillEnabled = plugin.isSmartFillEnabledFor(player);
 
         // IMPROVEMENT: shallow surface structures (PvP arenas, crystal
         // holes, player-built rooms) are exempted entirely - see the
@@ -1077,7 +1077,7 @@ public final class ChunkListener implements PacketListener {
      */
     private boolean cancelIfHiddenHardFloor(PacketSendEvent event, Player player, int x, int y, int z) {
         if (!isAtOrBelowVoidY(player, y)) return false;
-        if (!plugin.isSmartFillEnabled()) {
+        if (!plugin.isSmartFillEnabledFor(player)) {
             if (!plugin.isProtectionActive(player)) return false;
             event.setCancelled(true);
             return true;

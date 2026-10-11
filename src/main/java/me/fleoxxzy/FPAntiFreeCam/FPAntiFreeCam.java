@@ -219,6 +219,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
      */
     private boolean smartFillAlwaysOn = true;
 
+    /** When true, Bedrock (Geyser/Floodgate) players get flat masking instead of Smart Fill. */
+    private boolean smartFillDisableForBedrock = true;
+
     /**
      * NEW: top of the Smart Fill camouflage band. Defaults to protection-y
      * when not explicitly configured. void-y sits below this band as a
@@ -493,6 +496,17 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
     // ── Smart Fill accessors ──────────────────────────────────────────────
     public boolean isSmartFillEnabled()             { return smartFillEnabled; }
+
+    /**
+     * Smart Fill for this specific player. Bedrock players fall back to the
+     * flat void-y masking when smart-fill.disable-for-bedrock is on, since
+     * Smart Fill's continuous chunk re-sends are rebuilt from scratch by
+     * Geyser and show as visible chunk reloads on Bedrock clients.
+     */
+    public boolean isSmartFillEnabledFor(Player player) {
+        if (!smartFillEnabled) return false;
+        return !(smartFillDisableForBedrock && isBedrockPlayer(player));
+    }
     public int     getSmartFillSampleRadius()       { return smartFillSampleRadius; }
     public int     getSmartFillMaxPaletteSize()     { return smartFillMaxPaletteSize; }
     public WrappedBlockState getSmartFillFallback()  { return smartFillFallbackState != null ? smartFillFallbackState : replacementBlockState; }
@@ -511,6 +525,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
      */
     public boolean isSmartFillActiveFor(Player player) {
         if (!smartFillEnabled || player == null) return false;
+        if (!isSmartFillEnabledFor(player)) return false;
         if (!isWorldProtected(player.getWorld().getName())) return false;
         if (Boolean.TRUE.equals(bypassCache.get(player.getUniqueId()))) return false;
         if (smartFillDisarmedForRelog.contains(player.getUniqueId())) return false;
@@ -587,6 +602,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         // NEW: continuous mode + camouflage ceiling
         smartFillAlwaysOn = cfg.getBoolean("replacement.smart-fill.always-on", true);
+        smartFillDisableForBedrock = cfg.getBoolean("replacement.smart-fill.disable-for-bedrock", true);
         int defaultCeiling = (int) Math.round(protectionY);
         smartFillCeilingY = cfg.contains("replacement.smart-fill.ceiling-y")
                 ? cfg.getInt("replacement.smart-fill.ceiling-y", defaultCeiling)
@@ -1985,7 +2001,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             try { currentVer = Double.parseDouble(rawVer.toString()); }
             catch (Exception e) { currentVer = 0.0; }
         }
-        double latestVer = 5.1;
+        double latestVer = 5.2;
 
         if (currentVer < latestVer) {
             getLogger().info("[FPAntiFreeCam] Updating config.yml to version " + latestVer + "…");
