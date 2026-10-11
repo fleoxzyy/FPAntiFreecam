@@ -132,7 +132,10 @@ public final class EntityHider implements Listener {
         for (Player player : Bukkit.getOnlinePlayers()) {
             if (!player.getWorld().equals(entity.getWorld())) continue;
             PlatformUtil.runForEntity(plugin, player, () -> {
-                if (!entity.isValid() || !player.isOnline()) return;
+                // Folia: the entity may belong to another region (far from
+                // this player); touching it from here would throw.
+                if (!player.isOnline() || !PlatformUtil.isOwnedByCurrentRegion(entity)) return;
+                if (!entity.isValid()) return;
                 if (shouldHideEntityFrom(player, entity)) {
                     hideFrom(player, entity);
                 }
@@ -219,9 +222,39 @@ public final class EntityHider implements Listener {
         PlatformUtil.runForEntity(plugin, player, () -> {
             if (!player.isOnline()) return;
             for (Entity e : getUndergroundNearby(player)) {
-                if (shouldHideEntityFrom(player, e)) hideFrom(player, e);
+                if (!PlatformUtil.isOwnedByCurrentRegion(e)) continue;
+                try {
+                    if (shouldHideEntityFrom(player, e)) hideFrom(player, e);
+                } catch (Exception ignored) {}
             }
         });
+    }
+
+    /**
+     * BUGFIX (invisible mobs): an entity hidden while it was underground used
+     * to stay hidden until the player's own protection state changed, even
+     * after it walked up out of the hidden zone and attacked the player. On
+     * Folia, showing an entity from another region also threw and aborted the
+     * whole reveal pass, leaving the rest hidden. This re-checks every entity
+     * hidden from the player and shows the ones that should be visible again.
+     * Entities owned by another Folia region are far away and are retried on
+     * the next pass. Must run on the player's thread.
+     */
+    public void recheck(Player player) {
+        if (!player.isOnline()) return;
+        String prefix = player.getUniqueId().toString() + ":";
+        for (String key : new ArrayList<>(hidden)) {
+            if (!key.startsWith(prefix)) continue;
+            try {
+                Entity e = Bukkit.getEntity(UUID.fromString(key.substring(prefix.length())));
+                if (e == null) { hidden.remove(key); continue; }
+                if (!PlatformUtil.isOwnedByCurrentRegion(e)) continue;
+                if (!e.isValid()) { hidden.remove(key); continue; }
+                if (!shouldHideEntityFrom(player, e)) showTo(player, e);
+            } catch (IllegalArgumentException ex) {
+                hidden.remove(key);
+            } catch (Exception ignored) {}
+        }
     }
 
     /**
@@ -243,11 +276,14 @@ public final class EntityHider implements Listener {
                 try {
                     UUID entityId = UUID.fromString(key.substring(prefix.length()));
                     Entity e = Bukkit.getEntity(entityId);
-                    if (e != null && e.isValid()) showTo(player, e);
-                    else hidden.remove(key); // entity gone, clean up
-                } catch (Exception ignored) {
+                    if (e == null) { hidden.remove(key); continue; } // entity gone, clean up
+                    // Folia: owned by another region - keep it, recheck() shows it later.
+                    if (!PlatformUtil.isOwnedByCurrentRegion(e)) continue;
+                    if (e.isValid()) showTo(player, e);
+                    else hidden.remove(key);
+                } catch (IllegalArgumentException ex) {
                     hidden.remove(key);
-                }
+                } catch (Exception ignored) {}
             }
         });
     }

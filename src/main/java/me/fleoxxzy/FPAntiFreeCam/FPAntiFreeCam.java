@@ -291,6 +291,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private Object raycastTask;
     private Object actionBarTask;
     private Object entityHiderCleanupTask;
+    private Object entityRecheckTask;
 
     // Core utilities
     private PaperScheduler   paperScheduler;
@@ -377,6 +378,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         startEntityHiderCleanupTask();
         startSmartFillProximityTask();
         startSmartFillSightTask();
+        startEntityRecheckTask();
         // NOTE: freecamDetector no longer has a start() — periodic re-probing was
         // removed entirely. scheduleJoinProbe() (called from onPlayerJoin) is the
         // only automatic trigger now, nothing to start here.
@@ -512,6 +514,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public WrappedBlockState getSmartFillFallback()  { return smartFillFallbackState != null ? smartFillFallbackState : replacementBlockState; }
     public int     getSmartFillFallbackId()         { return smartFillFallbackId; }
     public SmartFillReveal getSmartFillReveal()     { return smartFillReveal; }
+    public EntityHider getEntityHider()             { return entityHider; }
     public int     getSmartFillCeilingY()           { return smartFillCeilingY; }
     public boolean isSmartFillAlwaysOn()            { return smartFillAlwaysOn; }
     public int     getSmartFillSurfaceStructureMinY()    { return smartFillSurfaceStructureMinY; }
@@ -940,6 +943,25 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     }
 
     /**
+     * Every second, re-shows entities that were hidden (EntityHider) or had
+     * their spawn packet cancelled (ChunkListener) but should now be visible,
+     * e.g. a mob that climbed out of the hidden zone toward the player. Runs
+     * on each player's own thread so it's safe on Folia.
+     */
+    private void startEntityRecheckTask() {
+        entityRecheckTask = PlatformUtil.runTaskTimer(this, () -> {
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                Player captured = p;
+                PlatformUtil.runForEntity(this, captured, () -> {
+                    if (!captured.isOnline()) return;
+                    if (entityHider != null) entityHider.recheck(captured);
+                    if (chunkListener != null) chunkListener.recheckHiddenSpawns(captured);
+                });
+            }
+        }, 20L, 20L);
+    }
+
+    /**
      * NEW: Smart Fill's continuous camouflage is computed per-packet from the
      * player's LIVE position, so the fill/reveal decision itself is always
      * correct the instant a chunk packet goes out. But Minecraft only sends
@@ -994,7 +1016,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
      */
     private void maybeRefreshSmartFillProximity(Player player) {
         if (!isSmartFillActiveFor(player)) {
-            if (chunkListener != null) chunkListener.cleanupPlayer(player.getUniqueId());
+            if (chunkListener != null) chunkListener.clearMaskedChunks(player.getUniqueId());
             return;
         }
         UUID id = player.getUniqueId();
@@ -1175,11 +1197,13 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         cancelTask(entityHiderCleanupTask);
         cancelTask(smartFillProximityTask);
         cancelTask(smartFillSightTask);
+        cancelTask(entityRecheckTask);
         raycastTask = null;
         actionBarTask = null;
         entityHiderCleanupTask = null;
         smartFillProximityTask = null;
         smartFillSightTask = null;
+        entityRecheckTask = null;
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -1762,6 +1786,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         startEntityHiderCleanupTask();
         startSmartFillProximityTask();
         startSmartFillSightTask();
+        startEntityRecheckTask();
         ChatUtil.sendSuccess(sender, lang("reload-success", String.join(", ", protectedWorlds)));
         return true;
     }

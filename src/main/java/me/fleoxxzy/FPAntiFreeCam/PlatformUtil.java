@@ -34,6 +34,7 @@ public final class PlatformUtil {
     private static Method asyncRunNow;
 
     private static Method isOwnedByCurrentRegionMethod;
+    private static Method isOwnedByCurrentRegionEntityMethod;
 
     private static Method entityGetScheduler;
     private static Method entitySchedulerRun;
@@ -65,6 +66,9 @@ public final class PlatformUtil {
 
         try {
             isOwnedByCurrentRegionMethod = Bukkit.class.getMethod("isOwnedByCurrentRegion", Location.class);
+        } catch (Exception ignored) {}
+        try {
+            isOwnedByCurrentRegionEntityMethod = Bukkit.class.getMethod("isOwnedByCurrentRegion", org.bukkit.entity.Entity.class);
         } catch (Exception ignored) {}
 
         try {
@@ -341,6 +345,22 @@ public final class PlatformUtil {
             try {
                 return (Boolean) isOwnedByCurrentRegionMethod.invoke(null, location);
             } catch (Exception ignored) {}
+        }
+        return true;
+    }
+
+    /**
+     * Returns true if the current thread owns the given entity, i.e. its state
+     * may be read/changed here. Safe to call from any thread. Always true on
+     * non-Folia servers.
+     */
+    public static boolean isOwnedByCurrentRegion(org.bukkit.entity.Entity entity) {
+        if (isFolia() && isOwnedByCurrentRegionEntityMethod != null) {
+            try {
+                return (Boolean) isOwnedByCurrentRegionEntityMethod.invoke(null, entity);
+            } catch (Exception e) {
+                return false;
+            }
         }
         return true;
     }

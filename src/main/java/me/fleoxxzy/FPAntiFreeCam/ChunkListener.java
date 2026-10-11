@@ -18,8 +18,13 @@ import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerBl
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerBlockChange;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerBlockEntityData;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerChunkData;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerDestroyEntities;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEffect;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityPositionSync;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityRelativeMove;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityRelativeMoveAndRotation;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntitySoundEffect;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityTeleport;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerMultiBlockChange;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerParticle;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSoundEffect;
@@ -96,6 +101,31 @@ public final class ChunkListener implements PacketListener {
      */
     private final Map<UUID, Map<Long, MaskedChunk>> maskedChunks = new ConcurrentHashMap<>();
 
+    /**
+     * Per-player entities whose SPAWN packet was cancelled (entity ID → last
+     * known position).
+     *
+     * BUGFIX (invisible mobs): cancelling a spawn packet only hides the
+     * entity from the client. The server still counts the entity as tracked
+     * and never sends the spawn again on its own. Before this, a mob that
+     * spawned in a hidden spot and then walked into view (or toward the
+     * player) stayed invisible while it attacked them. Movement packets for
+     * these entities are now watched, and the entity is re-sent once its
+     * position should no longer be hidden.
+     */
+    private final Map<UUID, Map<Integer, HiddenSpawn>> hiddenSpawns = new ConcurrentHashMap<>();
+
+    private static final class HiddenSpawn {
+        final UUID entityUuid;
+        volatile double x, y, z;
+        volatile boolean resyncQueued;
+
+        HiddenSpawn(UUID entityUuid, double x, double y, double z) {
+            this.entityUuid = entityUuid;
+            this.x = x; this.y = y; this.z = z;
+        }
+    }
+
     private static final class MaskedChunk {
         /** Bit i = section (minSection + i) contains filled blocks; bit 63 also covers any higher section. */
         final long sections;
@@ -144,6 +174,11 @@ public final class ChunkListener implements PacketListener {
         s.add(PacketType.Play.Server.UNLOAD_CHUNK);
         s.add(PacketType.Play.Server.RESPAWN);
         s.add(PacketType.Play.Server.JOIN_GAME);
+        s.add(PacketType.Play.Server.ENTITY_RELATIVE_MOVE);
+        s.add(PacketType.Play.Server.ENTITY_RELATIVE_MOVE_AND_ROTATION);
+        s.add(PacketType.Play.Server.ENTITY_TELEPORT);
+        s.add(PacketType.Play.Server.ENTITY_POSITION_SYNC);
+        s.add(PacketType.Play.Server.DESTROY_ENTITIES);
         HANDLED_TYPES = s;
     }
 
@@ -227,6 +262,18 @@ public final class ChunkListener implements PacketListener {
         }
         if (type == PacketType.Play.Server.RESPAWN || type == PacketType.Play.Server.JOIN_GAME) {
             maskedChunks.remove(uuid); // client drops every chunk on respawn/world change
+            hiddenSpawns.remove(uuid); // and every entity
+            return;
+        }
+        if (type == PacketType.Play.Server.DESTROY_ENTITIES) {
+            handleDestroyEntities(event, uuid);
+            return;
+        }
+        if (type == PacketType.Play.Server.ENTITY_RELATIVE_MOVE
+                || type == PacketType.Play.Server.ENTITY_RELATIVE_MOVE_AND_ROTATION
+                || type == PacketType.Play.Server.ENTITY_TELEPORT
+                || type == PacketType.Play.Server.ENTITY_POSITION_SYNC) {
+            handleHiddenEntityMove(event, uuid, type);
             return;
         }
 
@@ -981,6 +1028,15 @@ public final class ChunkListener implements PacketListener {
             if (!plugin.isPieChartProtectionEnabled()) return;
 
             if (cancelIfHiddenHardFloor(event, player, entityPos[0], entityY, entityPos[2])) {
+                // Remember the cancelled spawn: the server still thinks the
+                // client tracks this entity and will never re-send the spawn
+                // on its own, so it has to be re-synced once it should be
+                // visible again (see handleHiddenEntityMove / recheckHiddenSpawns).
+                UUID entityUuid = wrapper.getUUID().orElse(null);
+                if (entityUuid != null) {
+                    hiddenSpawns.computeIfAbsent(player.getUniqueId(), k -> new ConcurrentHashMap<>())
+                            .put(wrapper.getEntityId(), new HiddenSpawn(entityUuid, pos.getX(), pos.getY(), pos.getZ()));
+                }
                 plugin.dbg("SPAWN_ENTITY cancelled " + wrapper.getEntityType().getName()
                         + " at Y=" + entityY + " for " + player.getName());
             }
@@ -1213,6 +1269,125 @@ public final class ChunkListener implements PacketListener {
     /** Drops all per-player tracking (call on quit). */
     public void cleanupPlayer(UUID id) {
         maskedChunks.remove(id);
+        hiddenSpawns.remove(id);
+    }
+
+    /** Masked-chunk records only; used when Smart Fill turns off for a player. */
+    public void clearMaskedChunks(UUID id) {
+        maskedChunks.remove(id);
+    }
+
+    // ── Cancelled-spawn tracking (re-sends entities once they're visible) ─
+
+    private void handleDestroyEntities(PacketSendEvent event, UUID playerId) {
+        Map<Integer, HiddenSpawn> m = hiddenSpawns.get(playerId);
+        if (m == null || m.isEmpty()) return;
+        try {
+            WrapperPlayServerDestroyEntities wrapper = new WrapperPlayServerDestroyEntities(event);
+            for (int id : wrapper.getEntityIds()) m.remove(id);
+        } catch (Exception ignored) {}
+    }
+
+    private void handleHiddenEntityMove(PacketSendEvent event, UUID playerId, PacketType.Play.Server type) {
+        Map<Integer, HiddenSpawn> m = hiddenSpawns.get(playerId);
+        if (m == null || m.isEmpty()) return;
+        try {
+            int entityId;
+            Vector3d abs = null;
+            double dx = 0, dy = 0, dz = 0;
+            if (type == PacketType.Play.Server.ENTITY_RELATIVE_MOVE) {
+                WrapperPlayServerEntityRelativeMove w = new WrapperPlayServerEntityRelativeMove(event);
+                entityId = w.getEntityId();
+                dx = w.getDeltaX(); dy = w.getDeltaY(); dz = w.getDeltaZ();
+            } else if (type == PacketType.Play.Server.ENTITY_RELATIVE_MOVE_AND_ROTATION) {
+                WrapperPlayServerEntityRelativeMoveAndRotation w = new WrapperPlayServerEntityRelativeMoveAndRotation(event);
+                entityId = w.getEntityId();
+                dx = w.getDeltaX(); dy = w.getDeltaY(); dz = w.getDeltaZ();
+            } else if (type == PacketType.Play.Server.ENTITY_TELEPORT) {
+                WrapperPlayServerEntityTeleport w = new WrapperPlayServerEntityTeleport(event);
+                entityId = w.getEntityId();
+                abs = w.getPosition();
+            } else {
+                WrapperPlayServerEntityPositionSync w = new WrapperPlayServerEntityPositionSync(event);
+                entityId = w.getId();
+                abs = w.getValues() != null ? w.getValues().getPosition() : null;
+            }
+
+            HiddenSpawn hs = m.get(entityId);
+            if (hs == null) return;
+            if (abs != null) {
+                hs.x = abs.getX(); hs.y = abs.getY(); hs.z = abs.getZ();
+            } else {
+                hs.x += dx; hs.y += dy; hs.z += dz;
+            }
+            int bx = (int) Math.floor(hs.x), by = (int) Math.floor(hs.y), bz = (int) Math.floor(hs.z);
+            entityYCache.put(entityId, new int[]{ bx, by, bz });
+
+            if (hs.resyncQueued) return;
+            Player player = Bukkit.getPlayer(playerId);
+            if (player == null || !player.isOnline()) return;
+            if (shouldHideSpawn(player, bx, by, bz)) return;
+
+            hs.resyncQueued = true;
+            PlatformUtil.runForEntity(plugin, player, () -> resyncEntity(player, entityId, hs));
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * Periodic safety net for entities that stopped moving, or whose spawn
+     * became visible because the PLAYER moved or protection turned off.
+     * Must run on the player's own thread (Folia: the player's EntityScheduler).
+     */
+    public void recheckHiddenSpawns(Player player) {
+        Map<Integer, HiddenSpawn> m = hiddenSpawns.get(player.getUniqueId());
+        if (m == null || m.isEmpty() || !player.isOnline()) return;
+        for (Map.Entry<Integer, HiddenSpawn> e : new ArrayList<>(m.entrySet())) {
+            HiddenSpawn hs = e.getValue();
+            if (hs.resyncQueued) continue;
+            if (shouldHideSpawn(player, (int) Math.floor(hs.x), (int) Math.floor(hs.y), (int) Math.floor(hs.z))) continue;
+            hs.resyncQueued = true;
+            resyncEntity(player, e.getKey(), hs);
+        }
+    }
+
+    /** Runs on the player's thread. Makes the server re-send the entity's spawn to this player. */
+    private void resyncEntity(Player player, int entityId, HiddenSpawn hs) {
+        Map<Integer, HiddenSpawn> m = hiddenSpawns.get(player.getUniqueId());
+        if (m == null || m.get(entityId) != hs) return;
+        if (!player.isOnline() || !plugin.isEnabled()) { hs.resyncQueued = false; return; }
+        if (shouldHideSpawn(player, (int) Math.floor(hs.x), (int) Math.floor(hs.y), (int) Math.floor(hs.z))) {
+            hs.resyncQueued = false;
+            return;
+        }
+        Entity entity = Bukkit.getEntity(hs.entityUuid);
+        if (entity == null) { m.remove(entityId, hs); return; }
+        // Folia: the entity lives in another region (so it's far away). Try again later.
+        if (!PlatformUtil.isOwnedByCurrentRegion(entity)) { hs.resyncQueued = false; return; }
+        m.remove(entityId, hs);
+
+        EntityHider hider = plugin.getEntityHider();
+        if (hider != null && hider.isHiddenFrom(player, entity)) return; // EntityHider shows it when appropriate
+
+        try {
+            // Hide+show forces the tracker to drop and re-add the player, which
+            // re-sends the spawn (plus metadata/equipment) to this client only.
+            player.hideEntity(plugin, entity);
+            player.showEntity(plugin, entity);
+            plugin.dbg("Re-sent previously hidden entity #" + entityId + " to " + player.getName());
+        } catch (Exception ex) {
+            plugin.getLogger().warning("[FPAntiFreeCam] Entity re-send failed: " + ex.getMessage());
+        }
+    }
+
+    /** Same decision as the SPAWN_ENTITY cancel path, from any context. */
+    private boolean shouldHideSpawn(Player player, int x, int y, int z) {
+        if (!plugin.isPieChartProtectionEnabled()) return false;
+        World world = player.getWorld();
+        if (world == null || !plugin.isWorldProtected(world.getName())) return false;
+        if (!plugin.isProtectionActive(player) && !plugin.isSmartFillActiveFor(player)) return false;
+        if (!isAtOrBelowVoidY(player, y)) return false;
+        if (!plugin.isSmartFillEnabledFor(player)) return plugin.isProtectionActive(player);
+        return shouldCancelForPosition(player, y, x, z);
     }
 
     private static final int    REVEAL_REFRESH_MOVE_SQ  = 4 * 4;
