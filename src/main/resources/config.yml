@@ -5,7 +5,7 @@
 # ─────────────────────────────────────────────────────────────────────
 
 # Do not change this manually.
-config-version: 5.2
+config-version: 5.3
 
 # ── General ──────────────────────────────────────────────────────────
 settings:
@@ -159,6 +159,10 @@ anti-cheat:
 performance:
   # Paper/Spigot: max chunks refreshed per tick (1-500).
   max-chunks-per-tick: 40
+
+  # Folia: max chunks re-sent to one player per tick (1-64). Smart Fill
+  # refreshes are spread out over ticks so they don't flood the network.
+  max-chunks-per-player-per-tick: 8
 
   # When a player comes near protection-y, refresh a large radius at once
   # so there is no moment where real blocks show.

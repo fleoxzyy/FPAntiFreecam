@@ -38,6 +38,7 @@ public final class PlatformUtil {
 
     private static Method entityGetScheduler;
     private static Method entitySchedulerRun;
+    private static Method entitySchedulerRunDelayed;
 
     static {
         try {
@@ -75,6 +76,7 @@ public final class PlatformUtil {
             entityGetScheduler = Class.forName("org.bukkit.entity.Entity").getMethod("getScheduler");
             Class<?> entitySchedulerCls = entityGetScheduler.getReturnType();
             entitySchedulerRun = entitySchedulerCls.getMethod("run", Plugin.class, Consumer.class, Runnable.class);
+            entitySchedulerRunDelayed = entitySchedulerCls.getMethod("runDelayed", Plugin.class, Consumer.class, Runnable.class, long.class);
         } catch (Exception ignored) {}
     }
 
@@ -276,6 +278,30 @@ public final class PlatformUtil {
             }
         }
         runTask(plugin, task);
+        return true;
+    }
+
+    /**
+     * Delayed version of {@link #runForEntity(Plugin, org.bukkit.entity.Entity, Runnable, Runnable)}.
+     * Returns false if the entity was already retired, in which case neither
+     * callback runs. On non-Folia platforms the task runs on the main thread.
+     */
+    public static boolean runForEntityLater(Plugin plugin, org.bukkit.entity.Entity entity,
+                                            Runnable task, Runnable retired, long delayTicks) {
+        if (!plugin.isEnabled()) return false;
+        long delay = Math.max(1L, delayTicks);
+        if (isFolia() && entityGetScheduler != null && entitySchedulerRunDelayed != null) {
+            try {
+                Object scheduler = entityGetScheduler.invoke(entity);
+                if (scheduler == null) return false;
+                return entitySchedulerRunDelayed.invoke(scheduler, plugin,
+                        (Consumer<Object>) st -> task.run(), retired, delay) != null;
+            } catch (Exception e) {
+                plugin.getLogger().warning("[FPAntiFreeCam] Folia EntityScheduler (delayed) failed: " + e.getMessage());
+                return false;
+            }
+        }
+        runTaskLater(plugin, task, delay);
         return true;
     }
 

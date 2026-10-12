@@ -663,6 +663,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (entityHider     != null) entityHider.loadSettings();
         if (freecamDetector != null) freecamDetector.loadSettings();
         if (paperScheduler  != null) paperScheduler.loadSettings();
+        if (foliaScheduler  != null) foliaScheduler.loadSettings();
 
         // Validate Y thresholds
         if (deepDeactivationY >= protectionY) {
@@ -2026,7 +2027,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             try { currentVer = Double.parseDouble(rawVer.toString()); }
             catch (Exception e) { currentVer = 0.0; }
         }
-        double latestVer = 5.2;
+        double latestVer = 5.3;
 
         if (currentVer < latestVer) {
             getLogger().info("[FPAntiFreeCam] Updating config.yml to version " + latestVer + "…");

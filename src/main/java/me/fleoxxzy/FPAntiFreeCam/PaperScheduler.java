@@ -24,6 +24,7 @@ public final class PaperScheduler {
     private static final long REFRESH_COOLDOWN_MS = 50L;
 
     private final Plugin              plugin;
+    private final PlayerChunkSender   sender;
     private       int                 maxPerTick      = 40;
     private final Map<UUID, Long>     lastRefreshTime = new ConcurrentHashMap<>();
     private final Queue<ChunkTask>    queue           = new ConcurrentLinkedQueue<>();
@@ -33,6 +34,7 @@ public final class PaperScheduler {
 
     public PaperScheduler(Plugin plugin) {
         this.plugin = plugin;
+        this.sender = new PlayerChunkSender(plugin);
         loadSettings();
         startDrainTask();
     }
@@ -127,8 +129,11 @@ public final class PaperScheduler {
                 Player p = Bukkit.getPlayer(t.playerId);
                 if (p != null && p.isOnline()
                         && p.getWorld().equals(t.world)
-                        && t.world.isChunkLoaded(t.cx, t.cz)) {
-                    t.world.refreshChunk(t.cx, t.cz);
+                        && t.world.isChunkLoaded(t.cx, t.cz)
+                        && sender.shouldSend(p, t.world, t.cx, t.cz)) {
+                    // Only to the player who needs it - World#refreshChunk
+                    // would re-send it to everyone watching this chunk.
+                    sender.send(p, t.world, t.cx, t.cz);
                     processed++;
                 }
             } catch (Exception e) {
@@ -150,7 +155,7 @@ public final class PaperScheduler {
         ChunkTask(World world, int cx, int cz, UUID playerId, int ring) {
             this.world = world; this.cx = cx; this.cz = cz;
             this.playerId = playerId; this.ring = ring;
-            this.key = world.getUID() + ":" + cx + ":" + cz;
+            this.key = playerId + ":" + world.getUID() + ":" + cx + ":" + cz;
         }
     }
 }
