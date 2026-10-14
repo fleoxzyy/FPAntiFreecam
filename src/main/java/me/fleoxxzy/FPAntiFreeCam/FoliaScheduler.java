@@ -31,8 +31,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class FoliaScheduler {
 
-    private static final long REGION_SWITCH_COOLDOWN_MS = 100L;
-
     private final Plugin            plugin;
     private final PlayerChunkSender sender;
     private final Map<UUID, Long>   lastRefreshTime = new ConcurrentHashMap<>();
@@ -60,10 +58,13 @@ public final class FoliaScheduler {
     // ── Public API ────────────────────────────────────────────────────────
 
     public void refreshChunks(Player player, int radiusChunks) {
+        // BUGFIX (void gaps): this used to drop any request within 100 ms of
+        // the previous one. When protection turned on and then off again
+        // that quickly (raycast zone, teleports), the "turn off" refresh was
+        // silently dropped and the client kept masked chunks. Duplicate
+        // chunks are already skipped by the per-player pending set.
         UUID id  = player.getUniqueId();
         long now = System.currentTimeMillis();
-        Long last = lastRefreshTime.get(id);
-        if (last != null && now - last < REGION_SWITCH_COOLDOWN_MS) return;
 
         Location loc   = player.getLocation();
         World    world = loc.getWorld();

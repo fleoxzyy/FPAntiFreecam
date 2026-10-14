@@ -21,8 +21,6 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  */
 public final class PaperScheduler {
 
-    private static final long REFRESH_COOLDOWN_MS = 50L;
-
     private final Plugin              plugin;
     private final PlayerChunkSender   sender;
     private       int                 maxPerTick      = 40;
@@ -47,10 +45,10 @@ public final class PaperScheduler {
     // ── Public API ────────────────────────────────────────────────────────
 
     public void refreshChunks(Player player, int radiusChunks) {
+        // BUGFIX: no longer drops requests within 50 ms of the last one -
+        // see FoliaScheduler#refreshChunks. The pending set skips duplicates.
         UUID id  = player.getUniqueId();
         long now = System.currentTimeMillis();
-        Long last = lastRefreshTime.get(id);
-        if (last != null && now - last < REFRESH_COOLDOWN_MS) return;
 
         World world = player.getWorld();
         if (world == null) return;

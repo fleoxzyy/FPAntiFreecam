@@ -37,6 +37,7 @@ import org.bukkit.entity.Player;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -100,6 +101,22 @@ public final class ChunkListener implements PacketListener {
      * chunks this map says the client still has fake blocks in.
      */
     private final Map<UUID, Map<Long, MaskedChunk>> maskedChunks = new ConcurrentHashMap<>();
+
+    /**
+     * Per-player chunks the client was sent with flat (non-Smart-Fill)
+     * masking in them, keyed like {@link #maskedChunks}.
+     *
+     * BUGFIX (void gaps underground): flat masking relied on ONE full view
+     * refresh when protection turned off to replace every masked chunk. If
+     * that refresh was skipped (refresh cooldowns, a teleport, a quick
+     * on/off flip) or a chunk was sent masked while it was still draining,
+     * the client kept those chunks with everything below void-y as air
+     * until a relog or /fpac reload. Players saw a "missing chunk" gap,
+     * and walking into it left them stuck and rubber-banding because the
+     * server still had solid blocks there. These chunks are now tracked and
+     * re-sent once protection is off (see FPAntiFreeCam#healStaleFlatChunks).
+     */
+    private final Map<UUID, Set<Long>> flatMaskedChunks = new ConcurrentHashMap<>();
 
     /**
      * Per-player entities whose SPAWN packet was cancelled (entity ID → last
@@ -257,11 +274,13 @@ public final class ChunkListener implements PacketListener {
             try {
                 WrapperPlayServerUnloadChunk unload = new WrapperPlayServerUnloadChunk(event);
                 forgetChunk(uuid, unload.getChunkX(), unload.getChunkZ());
+                forgetFlatMasked(uuid, unload.getChunkX(), unload.getChunkZ());
             } catch (Exception ignored) {}
             return;
         }
         if (type == PacketType.Play.Server.RESPAWN || type == PacketType.Play.Server.JOIN_GAME) {
             maskedChunks.remove(uuid); // client drops every chunk on respawn/world change
+            flatMaskedChunks.remove(uuid);
             hiddenSpawns.remove(uuid); // and every entity
             return;
         }
@@ -296,6 +315,8 @@ public final class ChunkListener implements PacketListener {
         }
 
         if (!plugin.isProtectionActive(player) && !plugin.isSmartFillActiveFor(player)) {
+            // This chunk goes out unmasked, so it replaces any masked copy.
+            if (type == PacketType.Play.Server.CHUNK_DATA) forgetFlatMaskedFromPacket(event, uuid);
             // Still cache entity Y even when nothing needs hiding right now
             if (isSpawnPacket) cacheEntitySpawnY(event);
             return;
@@ -385,8 +406,10 @@ public final class ChunkListener implements PacketListener {
             // everything at/below hardFloorY, but ONLY while the player is
             // in the surface-triggered "hidden" state, exactly like before
             // Smart Fill existed.
-            if (!fullProtection) return;
-            if (minY > hardFloorY) return;
+            if (!fullProtection || minY > hardFloorY) {
+                forgetFlatMasked(player.getUniqueId(), column);
+                return;
+            }
 
             boolean modified      = false;
             long    replacedCount = 0;
@@ -427,13 +450,17 @@ public final class ChunkListener implements PacketListener {
                 event.markForReEncode(true);
                 plugin.incrementChunksModified();
                 plugin.addBlocksReplaced(replacedCount);
+                rememberFlatMasked(player.getUniqueId(), column);
                 plugin.dbg("CHUNK_DATA modified for " + player.getName()
                         + " (" + replacedCount + " blocks, flat, tile entities stripped)");
+            } else {
+                forgetFlatMasked(player.getUniqueId(), column);
             }
             return;
         }
 
         // Smart Fill mode
+        forgetFlatMasked(player.getUniqueId(), column); // this send replaces any flat-masked copy
         if (!smartFillActive) return; // nothing to hide for this player right now
 
         int ceilingY = Math.max(hardFloorY, plugin.getSmartFillCeilingY());
@@ -665,6 +692,7 @@ public final class ChunkListener implements PacketListener {
                     wrapper.setBlockState(replacement);
                     event.markForReEncode(true);
                     plugin.addBlocksReplaced(1);
+                    rememberFlatMasked(player.getUniqueId(), pos.getX() >> 4, pos.getZ() >> 4);
                     plugin.dbg("BLOCK_CHANGE modified at " + pos + " for " + player.getName());
                 }
                 return;
@@ -776,6 +804,7 @@ public final class ChunkListener implements PacketListener {
                         block.setBlockId(replacementId);
                         replacedCount++;
                         modified = true;
+                        rememberFlatMasked(player.getUniqueId(), block.getX() >> 4, block.getZ() >> 4);
                     }
                 }
                 if (modified) {
@@ -1181,6 +1210,47 @@ public final class ChunkListener implements PacketListener {
         if (m != null) m.remove(columnKey(cx, cz));
     }
 
+    private void rememberFlatMasked(UUID playerId, int cx, int cz) {
+        flatMaskedChunks.computeIfAbsent(playerId, k -> ConcurrentHashMap.newKeySet()).add(columnKey(cx, cz));
+    }
+
+    private void rememberFlatMasked(UUID playerId, Column column) {
+        if (column != null) rememberFlatMasked(playerId, column.getX(), column.getZ());
+    }
+
+    private void forgetFlatMasked(UUID playerId, int cx, int cz) {
+        Set<Long> s = flatMaskedChunks.get(playerId);
+        if (s != null) s.remove(columnKey(cx, cz));
+    }
+
+    private void forgetFlatMasked(UUID playerId, Column column) {
+        if (column != null) forgetFlatMasked(playerId, column.getX(), column.getZ());
+    }
+
+    private void forgetFlatMaskedFromPacket(PacketSendEvent event, UUID playerId) {
+        Set<Long> s = flatMaskedChunks.get(playerId);
+        if (s == null || s.isEmpty()) return;
+        try {
+            forgetFlatMasked(playerId, new WrapperPlayServerChunkData(event).getColumn());
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * Removes and returns the chunks this player's client still has with
+     * flat masking in them. Re-sending them while protection is off
+     * replaces them with the real blocks; if protection is back on by
+     * then, they are simply masked and recorded again.
+     */
+    public Set<Long> takeFlatMaskedChunks(UUID playerId) {
+        Set<Long> s = flatMaskedChunks.get(playerId);
+        if (s == null || s.isEmpty()) return Collections.emptySet();
+        Set<Long> out = new HashSet<>();
+        for (Long k : s) {
+            if (s.remove(k)) out.add(k);
+        }
+        return out;
+    }
+
     private static long columnKey(int cx, int cz) {
         return ((long) cx << 32) | (cz & 0xFFFFFFFFL);
     }
@@ -1269,6 +1339,7 @@ public final class ChunkListener implements PacketListener {
     /** Drops all per-player tracking (call on quit). */
     public void cleanupPlayer(UUID id) {
         maskedChunks.remove(id);
+        flatMaskedChunks.remove(id);
         hiddenSpawns.remove(id);
     }
 

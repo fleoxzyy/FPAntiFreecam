@@ -274,7 +274,7 @@ public final class PlatformUtil {
                 return entitySchedulerRun.invoke(scheduler, plugin, (Consumer<Object>) st -> task.run(), retired) != null;
             } catch (Exception e) {
                 plugin.getLogger().warning("[FPAntiFreeCam] Folia EntityScheduler failed: " + e.getMessage());
-                return true;
+                return false;
             }
         }
         runTask(plugin, task);

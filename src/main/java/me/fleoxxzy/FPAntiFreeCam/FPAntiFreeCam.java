@@ -957,9 +957,33 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                     if (!captured.isOnline()) return;
                     if (entityHider != null) entityHider.recheck(captured);
                     if (chunkListener != null) chunkListener.recheckHiddenSpawns(captured);
+                    healStaleFlatChunks(captured);
                 });
             }
         }, 20L, 20L);
+    }
+
+    /**
+     * BUGFIX (void gaps underground): with Smart Fill off, the client could
+     * keep chunks that were sent with everything below void-y as air after
+     * protection had already turned off - the one refresh meant to replace
+     * them could be dropped by a cooldown or race. Those chunks showed as a
+     * missing-chunk gap until a relog or /fpac reload, and walking into one
+     * froze the player in place with the screen glitching, since the server
+     * still had solid blocks there. Once a second this re-sends any chunk
+     * the client still has flat-masked while protection is off.
+     * Runs on the player's own thread.
+     */
+    private void healStaleFlatChunks(Player player) {
+        if (chunkListener == null) return;
+        if (isProtectionActive(player) && !isSmartFillEnabledFor(player)
+                && isWorldProtected(player.getWorld().getName())) {
+            return; // still meant to be masked
+        }
+        Set<Long> stale = chunkListener.takeFlatMaskedChunks(player.getUniqueId());
+        if (stale.isEmpty()) return;
+        refreshColumns(player, stale);
+        dbg("Re-sent " + stale.size() + " stale masked chunks to " + player.getName());
     }
 
     /**
