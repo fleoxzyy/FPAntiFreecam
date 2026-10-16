@@ -1,7 +1,6 @@
 package me.fleoxxzy.FPAntiFreeCam;
 
 import org.bukkit.Location;
-import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
 import org.bukkit.util.Vector;
@@ -99,9 +98,6 @@ public final class SmartFillReveal {
             this.computedAt = computedAt;
         }
     }
-
-    /** Per-Material "does this block stop a sight ray" lookup, lazily filled. 0 = unknown, 1 = blocks, 2 = see-through. */
-    private static final byte[] SIGHT_BLOCKING = new byte[Material.values().length];
 
     public SmartFillReveal(FPAntiFreeCam plugin) {
         this.plugin = plugin;
@@ -293,61 +289,25 @@ public final class SmartFillReveal {
         double ox = eye.getX(), oy = eye.getY(), oz = eye.getZ();
 
         Set<Long> sections = new HashSet<>(1024);
-        int budget = sightBudget;
+        int[] budget = { sightBudget };
 
-        rays:
+        // IMPROVEMENT: the voxel walk itself now lives in SightRaycaster so
+        // Anti-Xray shares the exact same DDA and chunk/region guards.
         for (long packed : order) {
             int r = (int) packed;
             double dx = dirs[r * 3], dy = dirs[r * 3 + 1], dz = dirs[r * 3 + 2];
+            boolean ascending = dy >= 0;
 
-            int x = ex, y = ey, z = ez;
-            int stepX = dx > 0 ? 1 : -1, stepY = dy > 0 ? 1 : -1, stepZ = dz > 0 ? 1 : -1;
-            double tDeltaX = dx != 0 ? Math.abs(1.0 / dx) : Double.POSITIVE_INFINITY;
-            double tDeltaY = dy != 0 ? Math.abs(1.0 / dy) : Double.POSITIVE_INFINITY;
-            double tDeltaZ = dz != 0 ? Math.abs(1.0 / dz) : Double.POSITIVE_INFINITY;
-            double tMaxX = dx != 0 ? (dx > 0 ? (x + 1 - ox) : (ox - x)) * tDeltaX : Double.POSITIVE_INFINITY;
-            double tMaxY = dy != 0 ? (dy > 0 ? (y + 1 - oy) : (oy - y)) * tDeltaY : Double.POSITIVE_INFINITY;
-            double tMaxZ = dz != 0 ? (dz > 0 ? (z + 1 - oz) : (oz - z)) * tDeltaZ : Double.POSITIVE_INFINITY;
-
-            int lastCx = Integer.MIN_VALUE, lastCz = Integer.MIN_VALUE;
-
-            while (true) {
-                if (--budget < 0) break rays;
-                if (y < minY || y >= maxY) break;
-
-                int cx = x >> 4, cz = z >> 4;
-                if (cx != lastCx || cz != lastCz) {
-                    // Never trigger a chunk load, and on Folia never read another region's blocks.
-                    if (!world.isChunkLoaded(cx, cz)) break;
-                    if (folia && !PlatformUtil.isOwnedByCurrentRegion(new Location(world, cx << 4, y, cz << 4))) break;
-                    lastCx = cx;
-                    lastCz = cz;
-                }
-
-                Material m;
-                try {
-                    m = world.getType(x, y, z);
-                } catch (Exception e) {
-                    break;
-                }
-                if (blocksSight(m)) break;
-
-                if (y <= ceilingY) {
-                    sections.add(sectionKey(x, y, z));
-                } else if (dy >= 0) {
-                    break; // above the camouflage band and not coming back down
-                }
-
-                double t;
-                if (tMaxX < tMaxY && tMaxX < tMaxZ) {
-                    x += stepX; t = tMaxX; tMaxX += tDeltaX;
-                } else if (tMaxY < tMaxZ) {
-                    y += stepY; t = tMaxY; tMaxY += tDeltaY;
-                } else {
-                    z += stepZ; t = tMaxZ; tMaxZ += tDeltaZ;
-                }
-                if (t > maxDist) break;
-            }
+            int result = SightRaycaster.walk(world, minY, maxY, folia, ox, oy, oz, dx, dy, dz, maxDist, budget,
+                    (x, y, z, type, blocks, t) -> {
+                        if (blocks) return false;
+                        if (y <= ceilingY) {
+                            sections.add(sectionKey(x, y, z));
+                            return true;
+                        }
+                        return !ascending; // above the camouflage band and not coming back down
+                    });
+            if (result == SightRaycaster.OUT_OF_BUDGET) break;
         }
 
         sightResults.put(id, new SightResult(Collections.unmodifiableSet(sections),
@@ -378,23 +338,6 @@ public final class SmartFillReveal {
     /** Drops a player's line-of-sight result (world change, Smart Fill no longer active). */
     public void clearSight(UUID id) {
         sightResults.remove(id);
-    }
-
-    private static boolean blocksSight(Material m) {
-        if (m == null) return false;
-        int ord = m.ordinal();
-        byte cached = SIGHT_BLOCKING[ord];
-        if (cached == 0) {
-            boolean blocks;
-            try {
-                blocks = m.isOccluding();
-            } catch (Exception e) {
-                blocks = true;
-            }
-            cached = blocks ? (byte) 1 : (byte) 2;
-            SIGHT_BLOCKING[ord] = cached;
-        }
-        return cached == 1;
     }
 
     private final Map<Integer, double[]> directionCache = new ConcurrentHashMap<>();
@@ -449,6 +392,21 @@ public final class SmartFillReveal {
         playerLookVectors.clear();
         recentlyRevealed.clear();
         sightResults.clear();
+    }
+
+    /** IMPROVEMENT: two short, readable rows for /fpac stats (reveal, sight). */
+    public String[] statsRows() {
+        int graceEntries = 0;
+        for (ConcurrentHashMap<Long, Long> m : recentlyRevealed.values()) graceEntries += m.size();
+        int sightSections = 0;
+        for (SightResult r : sightResults.values()) sightSections += r.sections.size();
+        String reveal = "&f" + revealRadius + " &7radius &8· &f" + lookDistance + " &7look &8· &f"
+                + playerLookVectors.size() + " &7players &8· &f" + graceEntries + " &7grace &8(" + (recentlyRevealedTtlMs / 1000) + "s)";
+        String sight = sightEnabled
+                ? "&f" + sightResults.size() + " &7players &8· &f" + sightSections + " &7sections &8· &7cap &f"
+                    + sightMaxDistanceCap + " &8· &7budget &f" + sightBudget
+                : "&7off";
+        return new String[]{ reveal, sight };
     }
 
     public String stats() {

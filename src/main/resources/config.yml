@@ -5,7 +5,7 @@
 # ─────────────────────────────────────────────────────────────────────
 
 # Do not change this manually.
-config-version: 5.3
+config-version: 5.4
 
 # ── General ──────────────────────────────────────────────────────────
 settings:
@@ -133,6 +133,48 @@ replacement:
       min-y: 30
       # Only rooms at most this many blocks tall (1-32).
       max-pocket-height: 10
+
+# ── Anti-Xray ────────────────────────────────────────────────────────
+# Ores are sent as the rock around them until the player has a clear
+# line of sight to them. Works in any world, not only those in worlds:.
+# Bypass: fpantifreecam.bypass.xray (or fpantifreecam.bypass).
+# If Paper's own anti-xray is on in the same world, turn one of them off.
+anti-xray:
+  # TESTING: on by default for now. Decide the release default before 1.5.3 ships.
+  enabled: true
+
+  # Ores within this many blocks are always shown, without a raycast.
+  always-reveal-radius: 3
+
+  # Max distance in blocks an ore can be revealed from (also capped by view distance).
+  max-ray-distance: 64
+
+  # Ray steps per player per check. Lower if it costs too much server time.
+  ray-budget: 20000
+
+  # Also test F5 front/back camera positions.
+  f5-aware: true
+
+  # Blocks a revealed ore stays revealed after the player moves away.
+  forget-distance: 96
+
+  # Per-world settings. Worlds not listed use "default"; listed worlds
+  # inherit any key they leave out from "default".
+  worlds:
+    default:
+      enabled: true
+      min-y: -64
+      # 320 covers mountain ores (emerald, iron and coal generate up there).
+      max-y: 320
+      hidden-ores: [coal_ore, deepslate_coal_ore, copper_ore, deepslate_copper_ore,
+        iron_ore, deepslate_iron_ore, gold_ore, deepslate_gold_ore, redstone_ore,
+        deepslate_redstone_ore, lapis_ore, deepslate_lapis_ore, diamond_ore,
+        deepslate_diamond_ore, emerald_ore, deepslate_emerald_ore, raw_iron_block, raw_copper_block]
+    world_nether:
+      hidden-ores: [nether_gold_ore, nether_quartz_ore, ancient_debris, gilded_blackstone]
+      max-y: 128
+    world_the_end:
+      enabled: false
 
 # ── Entities ─────────────────────────────────────────────────────────
 entities:

@@ -26,7 +26,8 @@ FPAntiFreeCam requires the following plugin to be installed on your server:
 
 ## ✨ Features
 
-- 👁️ **Anti-FreeCam / Anti-Xray** — hides all underground blocks via packet manipulation.
+- 👁️ **Anti-FreeCam** — hides all underground blocks via packet manipulation.
+- ⛏️ **Line-of-sight Anti-Xray** — ores are sent as the surrounding rock until the player can actually see them (F5-aware, per-world ore lists, off by default).
 - 📦 **Entity hiding** — conceals mobs, item frames, and farms inside protected zones.
 - 🕵️ **Freecam client detection** — probes for Freecam-mod translation keys once on join and runs a configurable command (kick/ban/webhook/etc.) on detection. Join-only, no periodic re-probing, so it never interrupts active PVP.
 - 🔔 **Update checker** — notifies admins in-game and in console when a new version is available.
@@ -57,11 +58,13 @@ FPAntiFreeCam requires the following plugin to be installed on your server:
 
 | Permission | Description | Default |
 |---|---|---|
-| `fpantifreecam.admin` | Full access to all commands | OP |
+| `fpantifreecam.admin` | Full access to all commands (does not include any bypass) | OP |
 | `fpantifreecam.reload` | Reload configuration | OP |
 | `fpantifreecam.debug` | Toggle debug mode | OP |
 | `fpantifreecam.world` | Manage protected worlds | OP |
-| `fpantifreecam.bypass` | Exempt from protection (staff/builders) | ❌ |
+| `fpantifreecam.bypass` | Exempt from FreeCam protection and Anti-Xray (staff/builders) | ❌ |
+| `fpantifreecam.bypass.freecam` | Exempt from FreeCam protection only; set to `false` to keep it on for `fpantifreecam.bypass` holders | ❌ |
+| `fpantifreecam.bypass.xray` | Exempt from Anti-Xray only; set to `false` to keep it on for `fpantifreecam.bypass` holders | ❌ |
 | `fpantifreecam.alerts` | Receive in-game Freecam-detection alerts | OP |
 
 ---

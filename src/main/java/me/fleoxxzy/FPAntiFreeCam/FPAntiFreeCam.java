@@ -141,6 +141,13 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private final Map<UUID, Boolean> bypassCache = new ConcurrentHashMap<>();
 
     /**
+     * NEW: Anti-Xray bypass (fpantifreecam.bypass.xray, see computeBypass),
+     * kept separate from bypassCache so an xray-only bypass doesn't also turn
+     * off freecam protection. Same rules: written on the main/region thread, read on Netty.
+     */
+    private final Map<UUID, Boolean> xrayBypassCache = new ConcurrentHashMap<>();
+
+    /**
      * NEW: freeze detection – tracks the last time a player had a meaningful
      * position change (≥0.5 blocks) while above protectionY.
      */
@@ -301,6 +308,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private FreecamDetector  freecamDetector;
     private ChunkListener    chunkListener;
     private SmartFillReveal  smartFillReveal;
+    // NEW: Anti-Xray (packet masking + line-of-sight reveal)
+    private AntiXrayEngine   antiXrayEngine;
+    private AntiXrayReveal   antiXrayReveal;
 
     // ═════════════════════════════════════════════════════════════════════
     //  JavaPlugin lifecycle
@@ -340,6 +350,21 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             getLogger().info("[FPAntiFreeCam] Freecam mod detection requires Paper and is disabled on Spigot.");
         }
         smartFillReveal = new SmartFillReveal(this);
+        // NEW: Anti-Xray. Constructed even when disabled so /fpac reload can turn it on.
+        // Isolated: if anything it needs is missing on this server version,
+        // only Anti-Xray is turned off, never the rest of the plugin.
+        try {
+            antiXrayEngine  = new AntiXrayEngine(this);
+            antiXrayEngine.loadSettings();
+            antiXrayReveal  = new AntiXrayReveal(this, antiXrayEngine);
+            getServer().getPluginManager().registerEvents(antiXrayReveal, this);
+            antiXrayEngine.checkPaperAntiXray();
+        } catch (Throwable t) {
+            getLogger().warning("[FPAntiFreeCam] Anti-Xray unavailable on this server and was disabled: "
+                    + t.getClass().getSimpleName() + ": " + t.getMessage());
+            antiXrayEngine = null;
+            antiXrayReveal = null;
+        }
         getServer().getPluginManager().registerEvents(updateChecker, this);
 
         // Initialize bStats Metrics (Plugin ID: 33706)
@@ -414,6 +439,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (paperScheduler  != null) paperScheduler.shutdown();
         if (chunkListener   != null) chunkListener.clearEntityCache();
         if (smartFillReveal != null) smartFillReveal.clearAll();
+        if (antiXrayEngine  != null) antiXrayEngine.clearAll();
         // Do NOT call api.terminate() — the standalone PacketEvents plugin owns the lifecycle.
         playerHiddenState.clear();
         refreshCooldowns.clear();
@@ -421,6 +447,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         internallyTeleporting.clear();
         manualBypass.clear();
         bypassCache.clear();
+        xrayBypassCache.clear();
         lastSignificantMoveMs.clear();
         lastSignificantMoveLoc.clear();
         smartFillLastChunkKey.clear();
@@ -442,11 +469,38 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
      */
     public boolean hasBypass(Player player) {
         if (player == null) return false;
-        boolean bypass = player.getGameMode() == org.bukkit.GameMode.SPECTATOR
-                || player.hasPermission("fpantifreecam.bypass")
-                || manualBypass.contains(player.getUniqueId());
+        boolean bypass = computeBypass(player, player.getGameMode(), "freecam");
         bypassCache.put(player.getUniqueId(), bypass);
+        updateXrayBypass(player);
         return bypass;
+    }
+
+    /** Main/region thread. Refreshes the cached Anti-Xray bypass flag. */
+    public void updateXrayBypass(Player player) {
+        if (player == null) return;
+        xrayBypassCache.put(player.getUniqueId(), computeBypass(player, player.getGameMode(), "xray"));
+    }
+
+    /**
+     * NEW: split bypass. fpantifreecam.bypass covers both features;
+     * fpantifreecam.bypass.freecam / fpantifreecam.bypass.xray override it
+     * per feature when explicitly set. So bypass=true + bypass.freecam=false
+     * still protects against freecam but skips Anti-Xray. Resolved here
+     * instead of via plugin.yml children because Bukkit's child-permission
+     * merge order can let the parent's implied true beat an explicit false.
+     * Spectator mode and /fpac bypass still exempt from both.
+     * Main/region thread only (hasPermission).
+     */
+    private boolean computeBypass(Player player, org.bukkit.GameMode mode, String feature) {
+        if (mode == org.bukkit.GameMode.SPECTATOR || manualBypass.contains(player.getUniqueId())) return true;
+        String node = "fpantifreecam.bypass." + feature;
+        if (player.isPermissionSet(node)) return player.hasPermission(node);
+        return player.hasPermission("fpantifreecam.bypass");
+    }
+
+    /** Netty-safe: cached Anti-Xray bypass. Unknown players count as not bypassed (fail closed). */
+    public boolean isXrayBypassed(UUID id) {
+        return id != null && Boolean.TRUE.equals(xrayBypassCache.get(id));
     }
 
     /**
@@ -477,6 +531,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public boolean isBedrockPlayer(Player player) {
         return bedrockSupport != null && bedrockSupport.isBedrock(player);
     }
+
+    BedrockSupport getBedrockSupport() { return bedrockSupport; }
 
     public WrappedBlockState getReplacementBlock() { return replacementBlockState; }
     public int getReplacementBlockId()             { return replacementBlockId;    }
@@ -514,6 +570,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public WrappedBlockState getSmartFillFallback()  { return smartFillFallbackState != null ? smartFillFallbackState : replacementBlockState; }
     public int     getSmartFillFallbackId()         { return smartFillFallbackId; }
     public SmartFillReveal getSmartFillReveal()     { return smartFillReveal; }
+    public AntiXrayEngine  getAntiXrayEngine()      { return antiXrayEngine; }
+    public AntiXrayReveal  getAntiXrayReveal()      { return antiXrayReveal; }
     public EntityHider getEntityHider()             { return entityHider; }
     public int     getSmartFillCeilingY()           { return smartFillCeilingY; }
     public boolean isSmartFillAlwaysOn()            { return smartFillAlwaysOn; }
@@ -871,33 +929,54 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     //  Background tasks
     // ═════════════════════════════════════════════════════════════════════
 
-    /** Raycast monitor: runs every 5 ticks (250 ms). Also feeds Smart Fill's look-direction cone. */
+    /** Raycast monitor: runs every 5 ticks (250 ms). Also feeds Smart Fill's look-direction cone and Anti-Xray. */
     private void startRaycastTask() {
         boolean feedLookCone = smartFillEnabled && smartFillReveal != null;
-        if (!raycastEnabled && !feedLookCone) return;
+        // NEW: Anti-Xray also runs while it has state left over from before a
+        // reload that turned it off, so those players get their real ores back.
+        boolean xray = antiXrayReveal != null && antiXrayEngine != null
+                && (antiXrayEngine.isEnabled() || antiXrayEngine.getTrackedPlayers() > 0);
+        if (!raycastEnabled && !feedLookCone && !xray) return;
         Runnable check = () -> {
             for (Player p : Bukkit.getOnlinePlayers()) {
-                if (isWorldProtected(p.getWorld().getName()) && !hasBypass(p)) {
-                    // PERF (Folia): Schedule each player's raycast on the region
-                    // thread that owns their location. rayTraceBlocks() accesses
-                    // world block data which must only happen on the owning thread.
-                    if (PlatformUtil.isFolia()) {
-                        Player captured = p;
-                        PlatformUtil.runTask(this, captured.getLocation(),
-                                () -> {
-                                    if (captured.isOnline()) {
-                                        if (raycastEnabled) checkRaycastActivation(captured);
-                                        if (smartFillReveal != null) smartFillReveal.updateLosReveal(captured);
-                                    }
-                                });
-                    } else {
-                        if (raycastEnabled) checkRaycastActivation(p);
-                        if (smartFillReveal != null) smartFillReveal.updateLosReveal(p);
-                    }
+                boolean freecam = (raycastEnabled || feedLookCone)
+                        && isWorldProtected(p.getWorld().getName()) && !hasBypass(p);
+                // Anti-Xray has its own per-world config, so it isn't tied to
+                // worlds.list or the freecam bypass.
+                if (!freecam && !xray) continue;
+                // PERF (Folia): Schedule each player's raycast on the region
+                // thread that owns their location. rayTraceBlocks() accesses
+                // world block data which must only happen on the owning thread.
+                if (PlatformUtil.isFolia()) {
+                    Player captured = p;
+                    PlatformUtil.runTask(this, captured.getLocation(),
+                            () -> {
+                                if (captured.isOnline()) runPlayerRaycasts(captured, freecam, xray);
+                            });
+                } else {
+                    runPlayerRaycasts(p, freecam, xray);
                 }
             }
         };
         raycastTask = PlatformUtil.runTaskTimer(this, check, 5L, 5L);
+    }
+
+    private void runPlayerRaycasts(Player p, boolean freecam, boolean xray) {
+        if (freecam) {
+            if (raycastEnabled) checkRaycastActivation(p);
+            if (smartFillReveal != null) smartFillReveal.updateLosReveal(p);
+        }
+        if (xray && antiXrayReveal != null) {
+            // Keeps fpantifreecam.bypass.xray current on permission changes.
+            // hasBypass() only runs here for protected worlds, and a player with
+            // a freecam bypass skips it entirely, so always refresh.
+            updateXrayBypass(p);
+            try {
+                antiXrayReveal.check(p);
+            } catch (Exception e) {
+                dbg("Anti-Xray check failed for " + p.getName() + ": " + e.getMessage());
+            }
+        }
     }
 
     /**
@@ -1359,12 +1438,14 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         lastSignificantMoveMs.remove(id);
         lastSignificantMoveLoc.remove(id);
         bypassCache.remove(id);
+        xrayBypassCache.remove(id);
         if (foliaScheduler != null) foliaScheduler.cleanupPlayer(id);
         if (paperScheduler != null) paperScheduler.cleanupPlayer(id);
         if (bedrockSupport  != null) bedrockSupport.cleanupPlayer(id);
         if (entityHider     != null) entityHider.cleanupPlayer(id);
         if (freecamDetector != null) freecamDetector.cleanupPlayer(id);
         if (smartFillReveal != null) smartFillReveal.cleanupPlayer(id);
+        if (antiXrayEngine  != null) antiXrayEngine.cleanupPlayer(id);
         if (chunkListener   != null) chunkListener.cleanupPlayer(id);
         smartFillLastChunkKey.remove(id);
         smartFillRefreshCooldown.remove(id);
@@ -1379,6 +1460,12 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         String toWorld = player.getWorld().getName();
         dbg("WorldChange: " + player.getName() + " → " + toWorld);
         if (smartFillReveal != null) smartFillReveal.clearSight(player.getUniqueId());
+        // The client dropped every chunk of the old world (RESPAWN already
+        // cleared this on Netty; this covers servers/proxies that skip it).
+        if (antiXrayEngine != null) {
+            antiXrayEngine.cleanupPlayer(player.getUniqueId());
+            antiXrayEngine.cacheMeta(player.getWorld());
+        }
         // Refresh bypass cache — permissions may differ per world
         hasBypass(player);
         if (isWorldProtected(toWorld)) {
@@ -1644,11 +1731,12 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onGameModeChange(org.bukkit.event.player.PlayerGameModeChangeEvent event) {
         Player player = event.getPlayer();
+        boolean willBypass = computeBypass(player, event.getNewGameMode(), "freecam");
+        // NEW: Anti-Xray can run in worlds without freecam protection, so its
+        // bypass flag is refreshed before the protected-world early return.
+        xrayBypassCache.put(player.getUniqueId(), computeBypass(player, event.getNewGameMode(), "xray"));
         if (!isWorldProtected(player.getWorld().getName())) return;
         
-        boolean willBypass = (event.getNewGameMode() == org.bukkit.GameMode.SPECTATOR) 
-                          || player.hasPermission("fpantifreecam.bypass") 
-                          || manualBypass.contains(player.getUniqueId());
         // Update bypass cache with the new state
         bypassCache.put(player.getUniqueId(), willBypass);
 
@@ -1799,7 +1887,17 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (chunkListener   != null) chunkListener.clearEntityCache();
         loadConfigValues();
         initReplacementBlock();
+        if (antiXrayEngine != null) {
+            try {
+                antiXrayEngine.loadSettings();
+                antiXrayEngine.checkPaperAntiXray();
+            } catch (Throwable t) {
+                getLogger().warning("[FPAntiFreeCam] Anti-Xray reload failed: "
+                        + t.getClass().getSimpleName() + ": " + t.getMessage());
+            }
+        }
         for (Player p : Bukkit.getOnlinePlayers()) {
+            hasBypass(p); // the xray bypass may be new to this config
             if (isWorldProtected(p.getWorld().getName())) {
                 handlePlayerInitialState(p, true);
             } else if (playerHiddenState.remove(p.getUniqueId()) != null) {
@@ -1877,6 +1975,13 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         return true;
     }
 
+    /**
+     * IMPROVEMENT: /fpac stats used to be ~25 prefixed lines of mixed
+     * key=value dumps and abbreviations (DeepDeactY, Pkts proc, EntityYCache).
+     * It's now grouped into titled sections with aligned labels, one idea
+     * per row, no chat prefix on every line, and numbers before their units
+     * so it reads at a glance.
+     */
     private boolean handleStats(CommandSender sender) {
         if (!sender.hasPermission("fpantifreecam.admin")) {
             sender.sendMessage(lang("no-permission")); return true;
@@ -1891,78 +1996,112 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             double[] tps = PlatformUtil.tps();
             if (tps == null) throw new IllegalStateException("TPS not available");
             double t1 = Math.min(tps[0], 20.0), t5 = Math.min(tps[1], 20.0), t15 = Math.min(tps[2], 20.0);
-            tpsStr = String.format("%s%.2f &7/ %s%.2f &7/ %s%.2f &8(1m/5m/15m)",
-                    t1  >= 18 ? "&a" : t1  >= 15 ? "&e" : "&c", t1,
-                    t5  >= 18 ? "&a" : t5  >= 15 ? "&e" : "&c", t5,
-                    t15 >= 18 ? "&a" : t15 >= 15 ? "&e" : "&c", t15);
-        } catch (Exception e) { tpsStr = "&7N/A"; }
+            tpsStr = String.format(java.util.Locale.ROOT, "%s%.1f &8· %s%.1f &8· %s%.1f &8(1m · 5m · 15m)",
+                    tpsColor(t1), t1, tpsColor(t5), t5, tpsColor(t15), t15);
+        } catch (Exception e) { tpsStr = "&7n/a"; }
 
         Runtime rt    = Runtime.getRuntime();
         long usedMB   = (rt.totalMemory() - rt.freeMemory()) / 1_048_576L;
         long maxMB    = rt.maxMemory() / 1_048_576L;
         int  memPct   = (int)(usedMB * 100L / Math.max(maxMB, 1L));
         String memC   = memPct >= 90 ? "&c" : memPct >= 70 ? "&e" : "&a";
-        String memStr = memC + usedMB + " MB &7/ &f" + maxMB + " MB &8(" + memPct + "%)";
+        String memStr = memC + usedMB + " &7/ &f" + maxMB + " MB &8(" + memC + memPct + "%&8)";
 
         long upSec  = (System.currentTimeMillis() - enabledAt) / 1_000L;
         long upMin  = upSec / 60L; upSec %= 60L;
         long upHour = upMin / 60L; upMin %= 60L;
-        String uptimeStr = String.format("&e%dh &e%dm &e%ds", upHour, upMin, upSec);
+        String uptimeStr = upHour > 0
+                ? String.format("&f%dh %dm", upHour, upMin)
+                : String.format("&f%dm %ds", upMin, upSec);
 
-        String sep = "&8" + "─".repeat(46);
-        ChatUtil.send(sender, sep);
-        ChatUtil.send(sender, "&b&l  FPAntiFreeCam &fv" + getDescription().getVersion()
-                + "  &8— &7Runtime Statistics");
-        ChatUtil.send(sender, sep);
-        ChatUtil.send(sender, " &7Platform    &8: &f" + PlatformUtil.getPlatformName());
-        ChatUtil.send(sender, " &7Uptime      &8: " + uptimeStr);
-        ChatUtil.send(sender, " &7TPS         &8: " + tpsStr);
-        ChatUtil.send(sender, " &7Memory      &8: " + memStr);
-        ChatUtil.send(sender, sep);
-        ChatUtil.send(sender, " &7Protected   &8: &a" + activeCount
-                + " &7active &8/ &f" + onlineCount + " &7online &8/ &e" + bypassCount + " &7bypassed");
-        ChatUtil.send(sender, " &7Worlds      &8: &a" + protectedWorlds.size()
-                + " &8— &7" + protectedWorlds);
-        ChatUtil.send(sender, " &7ProtectionY &8: &e" + protectionY
-                + "  &7HysteresisY &8: &e" + protectionHysteresisY
-                + "  &7VoidY &8: &e" + voidY
-                + "  &7DeepDeactY &8: &e" + deepDeactivationY
-                + "  &7PieChartProt &8: " + (pieChartProtection ? "&aON" : "&7OFF"));
-        if (!perWorldVoidY.isEmpty())
-            ChatUtil.send(sender, " &7PerWorldY   &8: &f" + perWorldVoidY);
-        ChatUtil.send(sender, " &7Block       &8: &f" + replacementBlockType
-                + " &8(id=" + replacementBlockId + ")");
-        ChatUtil.send(sender, " &7Raycast     &8: " + (raycastEnabled
-                ? "&aON &8| &7zone &8= &e" + (int)deepDeactivationY + "&8-&e" + (int)protectionY
-                + " &8| &7minUpY &8= &e" + raycastMinUpward
-                + " &8| &7debounce &8= &e" + raycastDebounceMs + "ms"
-                + " &8| &7multiDir &8= " + (raycastMultiDirectional ? "&aON" : "&cOFF")
-                : "&cOFF"));
-        ChatUtil.send(sender, " &7ActionBar   &8: " + (actionBarEnabled ? "&aON" : "&7OFF"));
-        ChatUtil.send(sender, " &7FreezeDetect&8: " + (freezeDetectionEnabled
-                ? "&aON &8(threshold=" + freezeDetectionSeconds + "s)" : "&7OFF"));
-        ChatUtil.send(sender, sep);
-        ChatUtil.send(sender, " &7Pkts proc   &8: &e" + totalPacketsProcessed.get());
-        ChatUtil.send(sender, " &7Chunks mod  &8: &e" + totalChunksModified.get());
-        ChatUtil.send(sender, " &7Blocks rep  &8: &e" + totalBlocksReplaced.get());
-        ChatUtil.send(sender, " &7Cooldown    &8: &a" + (refreshCooldownMs / 1_000)
-                + "s  &7Debug &8: " + (debugMode ? "&aON" : "&7OFF"));
-        if (bedrockSupport  != null) ChatUtil.send(sender, " &7Bedrock     &8: &a" + bedrockSupport.statusLine());
-        if (entityHider     != null) ChatUtil.send(sender, " &7EntityHider &8: &a" + entityHider.stats());
-        if (chunkListener   != null) ChatUtil.send(sender, " &7EntityYCache&8: &a" + chunkListener.getEntityCacheSize() + " entries");
-        if (freecamDetector != null) ChatUtil.send(sender, " &7FreecamDetect&8: " + (freecamDetector.isEnabled() ? "&aON" : "&7OFF"));
-        ChatUtil.send(sender, " \u00a77SmartFill  \u00a78: " + (smartFillEnabled
-                ? "\u00a7aON \u00a78| \u00a77cache \u00a78= \u00a7e" + (chunkListener != null ? chunkListener.getSmartFillCacheSize() : 0) + " \u00a77palettes"
-                + " \u00a78| \u00a77sampleR \u00a78= \u00a7e" + smartFillSampleRadius
-                + " \u00a78| \u00a77maxPalette \u00a78= \u00a7e" + smartFillMaxPaletteSize
-                + " \u00a78| \u00a77relogDisarmed \u00a78= \u00a7e" + smartFillDisarmedForRelog.size()
-                : "\u00a77OFF"));
-        if (smartFillReveal != null && smartFillEnabled)
-            ChatUtil.send(sender, " \u00a77SmartReveal\u00a78: \u00a7a" + smartFillReveal.stats());
-        if (foliaScheduler  != null) ChatUtil.send(sender, " &7Folia Sched &8: &a" + foliaScheduler.stats());
-        if (paperScheduler  != null) ChatUtil.send(sender, " &7Paper Sched &8: &a" + paperScheduler.stats());
-        ChatUtil.send(sender, sep);
+        String on = "&aon", off = "&7off";
+        String rule = "&8&m" + " ".repeat(52);
+
+        ChatUtil.sendRaw(sender, rule);
+        ChatUtil.sendRaw(sender, " &b&lFPAntiFreeCam &7v" + getDescription().getVersion()
+                + " &8· &7" + PlatformUtil.getPlatformName());
+        ChatUtil.sendRaw(sender, rule);
+
+        statsHeader(sender, "Server");
+        statsRow(sender, "Uptime", uptimeStr);
+        statsRow(sender, "TPS", tpsStr);
+        statsRow(sender, "Memory", memStr);
+
+        statsHeader(sender, "Protection");
+        statsRow(sender, "Players", "&a" + activeCount + " &7protected &8· &f" + onlineCount
+                + " &7online &8· &e" + bypassCount + " &7bypassed");
+        statsRow(sender, "Worlds", protectedWorlds.isEmpty() ? "&7none"
+                : "&f" + String.join("&8, &f", protectedWorlds));
+        statsRow(sender, "Heights", "&7protect &f" + fmtY(protectionY) + " &8· &7hysteresis &f" + fmtY(protectionHysteresisY)
+                + " &8· &7void &f" + voidY + " &8· &7deep &f" + fmtY(deepDeactivationY));
+        if (!perWorldVoidY.isEmpty()) {
+            StringBuilder sb = new StringBuilder();
+            perWorldVoidY.forEach((w, y) -> sb.append(sb.length() == 0 ? "" : "&8, ").append("&f").append(w).append(" &7").append(y));
+            statsRow(sender, "Void-y", sb.toString());
+        }
+        statsRow(sender, "Fill block", "&f" + replacementBlockType.toLowerCase(java.util.Locale.ROOT));
+        statsRow(sender, "Raycast", raycastEnabled
+                ? on + " &8· &7zone &f" + (int) deepDeactivationY + "&7–&f" + (int) protectionY
+                  + " &8· &7debounce &f" + raycastDebounceMs + "ms" + (raycastMultiDirectional ? " &8· &7multi-dir" : "")
+                : off);
+        statsRow(sender, "Features", "&7action bar " + (actionBarEnabled ? on : off)
+                + " &8· &7freeze " + (freezeDetectionEnabled ? on + " &8(" + freezeDetectionSeconds + "s)" : off)
+                + " &8· &7pie chart " + (pieChartProtection ? on : off)
+                + (freecamDetector != null ? " &8· &7mod detect " + (freecamDetector.isEnabled() ? on : off) : ""));
+
+        statsHeader(sender, "Smart Fill");
+        if (smartFillEnabled) {
+            statsRow(sender, "Palettes", "&f" + (chunkListener != null ? chunkListener.getSmartFillCacheSize() : 0)
+                    + " &7cached &8· &7sample &f" + smartFillSampleRadius + " &8· &7max size &f" + smartFillMaxPaletteSize
+                    + (smartFillDisarmedForRelog.isEmpty() ? "" : " &8· &e" + smartFillDisarmedForRelog.size() + " &7awaiting relog"));
+            if (smartFillReveal != null) {
+                String[] r = smartFillReveal.statsRows();
+                statsRow(sender, "Reveal", r[0]);
+                statsRow(sender, "Sight", r[1]);
+            }
+        } else {
+            statsRow(sender, "Status", off);
+        }
+
+        statsHeader(sender, "Anti-Xray");
+        if (antiXrayEngine != null && antiXrayEngine.isEnabled()) {
+            String[] r = antiXrayEngine.statsRows();
+            List<String> worlds = antiXrayEngine.activeWorlds();
+            statsRow(sender, "Worlds", worlds.isEmpty() ? "&7none" : "&f" + String.join("&8, &f", worlds));
+            statsRow(sender, "Ores", r[0]);
+            statsRow(sender, "Load", r[1]);
+        } else {
+            statsRow(sender, "Status", off);
+        }
+
+        statsHeader(sender, "Traffic");
+        statsRow(sender, "Packets", "&f" + totalPacketsProcessed.get() + " &7processed &8· &f"
+                + totalChunksModified.get() + " &7chunks &8· &f" + totalBlocksReplaced.get() + " &7blocks replaced");
+        if (foliaScheduler != null) statsRow(sender, "Scheduler", "&7Folia &8· &f" + foliaScheduler.stats());
+        if (paperScheduler != null) statsRow(sender, "Scheduler", "&7Paper &8· &f" + paperScheduler.stats());
+        statsRow(sender, "Caches", (entityHider != null ? "&f" + entityHider.stats() + " &8· " : "")
+                + "&f" + (chunkListener != null ? chunkListener.getEntityCacheSize() : 0) + " &7entity Y");
+        if (bedrockSupport != null) statsRow(sender, "Bedrock", bedrockSupport.statsRow());
+        statsRow(sender, "Misc", "&7refresh cooldown &f" + (refreshCooldownMs / 1_000) + "s &8· &7debug " + (debugMode ? on : off));
+        ChatUtil.sendRaw(sender, rule);
         return true;
+    }
+
+    private static String tpsColor(double t) {
+        return t >= 18 ? "&a" : t >= 15 ? "&e" : "&c";
+    }
+
+    private static String fmtY(double y) {
+        return y == Math.rint(y) ? Long.toString((long) y) : String.format(java.util.Locale.ROOT, "%.1f", y);
+    }
+
+    private static void statsHeader(CommandSender sender, String title) {
+        ChatUtil.sendRaw(sender, " &3&l" + title);
+    }
+
+    // The chat font is proportional, so labels use a » separator instead of space padding.
+    private static void statsRow(CommandSender sender, String label, String value) {
+        ChatUtil.sendRaw(sender, "   &7" + label + " &8» " + value);
     }
 
     /**
@@ -2051,7 +2190,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             try { currentVer = Double.parseDouble(rawVer.toString()); }
             catch (Exception e) { currentVer = 0.0; }
         }
-        double latestVer = 5.3;
+        double latestVer = 5.4;
 
         if (currentVer < latestVer) {
             getLogger().info("[FPAntiFreeCam] Updating config.yml to version " + latestVer + "…");

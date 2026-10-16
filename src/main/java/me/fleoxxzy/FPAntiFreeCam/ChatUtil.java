@@ -40,6 +40,19 @@ public final class ChatUtil {
         send(sender, "&c" + message);
     }
 
+    /**
+     * NEW: sends a line without the chat prefix. Used for multi-line panels
+     * like /fpac stats, where repeating the prefix on every row made the
+     * output twice as wide and hard to scan.
+     */
+    public static void sendRaw(CommandSender sender, String message) {
+        if (sender instanceof ConsoleCommandSender) {
+            sender.sendMessage(ChatColor.stripColor(color(message)));
+        } else {
+            sender.sendMessage(color(message));
+        }
+    }
+
     // ── Utility ───────────────────────────────────────────────────────────
 
     public static String color(String message) {

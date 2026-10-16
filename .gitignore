@@ -24,3 +24,13 @@ Thumbs.db
 # Sensitive info
 .env
 gradle.properties
+
+# Local planning / AI agent notes (never commit)
+plan.md
+PLAN.md
+*.plan.md
+notes/
+.opencode/
+.claude/
+AGENTS.md
+CLAUDE.md

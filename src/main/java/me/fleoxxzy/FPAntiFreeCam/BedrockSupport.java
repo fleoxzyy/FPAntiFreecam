@@ -131,8 +131,19 @@ public final class BedrockSupport {
         return isBedrock(player) ? Math.min(defaultMax, BEDROCK_MAX_SIGHT_REFRESH_COLUMNS) : defaultMax;
     }
 
+    /**
+     * NEW: Anti-Xray reveals are plain block changes, which Geyser translates
+     * fine, but a big cave opening up can reveal hundreds of ores in one check.
+     * Bedrock players get them spread over a few checks instead, each one
+     * nearest-first, so the closest ores still appear right away.
+     */
+    public int maxXrayRevealsPerCheck(Player player, int defaultMax) {
+        return isBedrock(player) ? Math.min(defaultMax, BEDROCK_MAX_XRAY_REVEALS_PER_CHECK) : defaultMax;
+    }
+
     private static final long BEDROCK_SMART_FILL_COOLDOWN_MS     = 4000L;
     private static final int  BEDROCK_MAX_SIGHT_REFRESH_COLUMNS = 8;
+    private static final int  BEDROCK_MAX_XRAY_REVEALS_PER_CHECK = 256;
 
     public void cleanupPlayer(UUID id) {
         bedrockCache.remove(id);
@@ -146,6 +157,14 @@ public final class BedrockSupport {
         return "Geyser: " + geyserAvailable
              + "  Floodgate: " + floodgateAvailable
              + "  Bedrock cached:" + bedrockCache.size();
+    }
+
+    /** IMPROVEMENT: readable /fpac stats row. */
+    public String statsRow() {
+        if (!isEnabled()) return "&7not detected";
+        return (geyserAvailable ? "&aGeyser" : "&8Geyser") + " &8· "
+             + (floodgateAvailable ? "&aFloodgate" : "&8Floodgate") + " &8· &f"
+             + bedrockCache.size() + " &7online";
     }
 
     /** Periodic cleanup: remove UUIDs whose players are no longer online. */

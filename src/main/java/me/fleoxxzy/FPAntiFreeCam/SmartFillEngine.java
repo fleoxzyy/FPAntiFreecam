@@ -211,7 +211,7 @@ public final class SmartFillEngine {
      * "minecraft:" namespace stripped if present. Returns null on any failure
      * so callers can fail safe (treat as a real roof) instead of throwing.
      */
-    private static String registryKey(StateType type) {
+    static String registryKey(StateType type) {
         try {
             Object name = type.getName();
             if (name == null) return null;
@@ -581,6 +581,13 @@ public final class SmartFillEngine {
         // one chunk-wide mix. Keeps fill material depth-appropriate.
         WeightedPalette[] bandPalettes = new WeightedPalette[sections.length];
         boolean anyBand = false;
+        // NEW: never sample a block Anti-Xray hides into a fill palette.
+        // TERRAIN_TYPES has no ores by default, but anti-xray hidden-ores is
+        // admin-configurable (e.g. clay or gravel for custom "ore" setups); a
+        // fake cave wall made of a hidden type would expose exactly what
+        // Anti-Xray is masking.
+        AntiXrayEngine xray = plugin.getAntiXrayEngine();
+        boolean excludeOres = xray != null && xray.isEnabled();
 
         for (int si = startSection; si <= endSection; si++) {
             Map<Integer, WrappedBlockState> idToState = new HashMap<>();
@@ -602,6 +609,7 @@ public final class SmartFillEngine {
                                 StateType type = state.getType();
                                 if (type != null && TERRAIN_TYPES.contains(type)) {
                                     int id = state.getGlobalId();
+                                    if (excludeOres && xray.isAnyHiddenOre(id)) continue;
                                     freq.merge(id, 1, Integer::sum);
                                     idToState.putIfAbsent(id, state);
                                 }

@@ -275,6 +275,8 @@ public final class ChunkListener implements PacketListener {
                 WrapperPlayServerUnloadChunk unload = new WrapperPlayServerUnloadChunk(event);
                 forgetChunk(uuid, unload.getChunkX(), unload.getChunkZ());
                 forgetFlatMasked(uuid, unload.getChunkX(), unload.getChunkZ());
+                AntiXrayEngine xray = plugin.getAntiXrayEngine();
+                if (xray != null) xray.forgetChunk(uuid, unload.getChunkX(), unload.getChunkZ());
             } catch (Exception ignored) {}
             return;
         }
@@ -282,6 +284,8 @@ public final class ChunkListener implements PacketListener {
             maskedChunks.remove(uuid); // client drops every chunk on respawn/world change
             flatMaskedChunks.remove(uuid);
             hiddenSpawns.remove(uuid); // and every entity
+            AntiXrayEngine xray = plugin.getAntiXrayEngine();
+            if (xray != null) xray.cleanupPlayer(uuid); // hidden ores and reveals went with those chunks
             return;
         }
         if (type == PacketType.Play.Server.DESTROY_ENTITIES) {
@@ -308,9 +312,19 @@ public final class ChunkListener implements PacketListener {
                 || type == PacketType.Play.Server.SPAWN_PAINTING;
 
         World world = player.getWorld();
+        // NEW: Anti-Xray has its own per-world config, so it has to run for
+        // block packets even where the freecam gate below returns early
+        // (world not in worlds.list, or protection / Smart Fill off).
+        boolean blockPacket = type == PacketType.Play.Server.CHUNK_DATA
+                || type == PacketType.Play.Server.BLOCK_CHANGE
+                || type == PacketType.Play.Server.MULTI_BLOCK_CHANGE;
+        AntiXrayEngine xray = plugin.getAntiXrayEngine();
+        boolean xrayActive = blockPacket && xray != null && xray.isActiveFor(player);
+
         if (world == null || !plugin.isWorldProtected(world.getName())) {
             // Still cache entity Y for spawn packets in protected worlds
             if (isSpawnPacket) cacheEntitySpawnY(event);
+            if (xrayActive) handleBlockPacket(event, player, type, false);
             return;
         }
 
@@ -319,15 +333,20 @@ public final class ChunkListener implements PacketListener {
             if (type == PacketType.Play.Server.CHUNK_DATA) forgetFlatMaskedFromPacket(event, uuid);
             // Still cache entity Y even when nothing needs hiding right now
             if (isSpawnPacket) cacheEntitySpawnY(event);
+            if (xrayActive) handleBlockPacket(event, player, type, false);
             return;
         }
 
-        if (type == PacketType.Play.Server.CHUNK_DATA) {
-            handleChunkData(event, player);
-        } else if (type == PacketType.Play.Server.BLOCK_CHANGE) {
-            handleBlockChange(event, player);
-        } else if (type == PacketType.Play.Server.MULTI_BLOCK_CHANGE) {
-            handleMultiBlockChange(event, player);
+        if (blockPacket) {
+            if (xrayActive) {
+                handleBlockPacket(event, player, type, true);
+            } else if (type == PacketType.Play.Server.CHUNK_DATA) {
+                handleChunkData(event, player);
+            } else if (type == PacketType.Play.Server.BLOCK_CHANGE) {
+                handleBlockChange(event, player);
+            } else {
+                handleMultiBlockChange(event, player);
+            }
         } else if (type == PacketType.Play.Server.BLOCK_ENTITY_DATA) {
             handleBlockEntityData(event, player);
         } else if (type == PacketType.Play.Server.BLOCK_ACTION) {
@@ -350,6 +369,84 @@ public final class ChunkListener implements PacketListener {
     public void onPacketReceive(PacketReceiveEvent event) {
         // No inbound packets need modification
     }
+
+    // ── Anti-Xray pass (NEW) ──────────────────────────────────────────────
+
+    /**
+     * NEW: CHUNK_DATA / BLOCK_CHANGE / MULTI_BLOCK_CHANGE with Anti-Xray on.
+     * Runs the existing void-y / Smart Fill handler first (if freecamPass),
+     * then Anti-Xray on whatever that left. The handlers have many early
+     * returns, so they're called as a whole instead of having Anti-Xray
+     * bolted onto each exit.
+     *
+     * <p>PacketEvents hands every new wrapper of the same type the previous
+     * wrapper's data (getLastUsedWrapper), so the wrappers built here see the
+     * column / block ids exactly as the freecam pass left them, and
+     * markForReEncode writes out the combined result.
+     */
+    private void handleBlockPacket(PacketSendEvent event, Player player, PacketType.Play.Server type,
+                                   boolean freecamPass) {
+        AntiXrayEngine xray = plugin.getAntiXrayEngine();
+        if (xray == null) return;
+        // BUGFIX: if Anti-Xray fails before the freecam handler ran, still run
+        // it, so a broken Anti-Xray pass can never leak the void-y / Smart Fill area.
+        boolean freecamDone = !freecamPass;
+        try {
+            if (type == PacketType.Play.Server.CHUNK_DATA) {
+                freecamDone = true; // set first: the handler itself must not run twice
+                if (freecamPass) handleChunkData(event, player);
+                WrapperPlayServerChunkData wrapper = new WrapperPlayServerChunkData(event);
+                Column column = wrapper.getColumn();
+                BaseChunk[] sections = column != null ? column.getChunks() : null;
+                if (sections == null) return;
+                if (xray.processChunk(player, sections, column.getX(), column.getZ())) {
+                    event.markForReEncode(true);
+                }
+            } else if (type == PacketType.Play.Server.BLOCK_CHANGE) {
+                int before = new WrapperPlayServerBlockChange(event).getBlockId();
+                freecamDone = true; // set first: the handler itself must not run twice
+                if (freecamPass) handleBlockChange(event, player);
+                WrapperPlayServerBlockChange wrapper = new WrapperPlayServerBlockChange(event);
+                Vector3i pos = wrapper.getBlockPosition();
+                if (pos == null) return;
+                int id = wrapper.getBlockId();
+                int out = xray.processBlockChange(player, pos.getX(), pos.getY(), pos.getZ(), id,
+                        id != before);
+                if (out != id) {
+                    wrapper.setBlockID(out);
+                    event.markForReEncode(true);
+                }
+            } else {
+                WrapperPlayServerMultiBlockChange.EncodedBlock[] pre = new WrapperPlayServerMultiBlockChange(event).getBlocks();
+                int[] before = null;
+                if (pre != null) {
+                    before = new int[pre.length];
+                    for (int i = 0; i < pre.length; i++) before[i] = pre[i] != null ? pre[i].getBlockId() : 0;
+                }
+                freecamDone = true; // set first: the handler itself must not run twice
+                if (freecamPass) handleMultiBlockChange(event, player);
+                WrapperPlayServerMultiBlockChange wrapper = new WrapperPlayServerMultiBlockChange(event);
+                if (xray.processMultiBlockChange(player, wrapper.getBlocks(), before)) {
+                    event.markForReEncode(true);
+                }
+            }
+        } catch (Exception e) {
+            plugin.dbg("Anti-Xray " + type + " error for " + player.getName() + ": " + e.getMessage());
+            if (!freecamDone) {
+                if (type == PacketType.Play.Server.CHUNK_DATA) handleChunkData(event, player);
+                else if (type == PacketType.Play.Server.BLOCK_CHANGE) handleBlockChange(event, player);
+                else handleMultiBlockChange(event, player);
+            }
+        }
+    }
+
+    // BUGFIX: there used to be a voidFloorFor() here that made Anti-Xray skip
+    // everything at/below void-y while Smart Fill / void hiding was active,
+    // "leaving it to Smart Fill". But Smart Fill shows everything within its
+    // reveal radius (28 blocks) as real, ores included, regardless of line of
+    // sight - so a player in a deep tunnel saw every ore around them. Anti-Xray
+    // now always runs after the freecam pass: whatever that pass replaced is
+    // no longer an ore id and is skipped, every ore it left real is masked.
 
     // ── CHUNK_DATA ────────────────────────────────────────────────────────
 

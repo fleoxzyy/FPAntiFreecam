@@ -32,13 +32,15 @@ commands:
 
 permissions:
   fpantifreecam.admin:
-    description: Full access to all FPAntiFreeCam admin commands.
+    description: >
+      Full access to all FPAntiFreeCam admin commands. Does NOT include any
+      bypass: grant fpantifreecam.bypass (or .bypass.freecam / .bypass.xray)
+      explicitly to staff who should be exempt.
     default: op
     children:
       fpantifreecam.reload: true
       fpantifreecam.debug: true
       fpantifreecam.world: true
-      fpantifreecam.bypass: true
       fpantifreecam.alerts: true
   fpantifreecam.reload:
     description: Allows reloading the configuration.
@@ -51,8 +53,19 @@ permissions:
     default: op
   fpantifreecam.bypass:
     description: >
-      Players with this permission are exempt from the FreeCam protection
-      (they can still see underground blocks). Useful for staff/builders.
+      Exempt from both FreeCam protection and Anti-Xray. Either part can be
+      turned back on by explicitly setting fpantifreecam.bypass.freecam or
+      fpantifreecam.bypass.xray to false. Useful for staff/builders.
+    default: false
+  fpantifreecam.bypass.freecam:
+    description: >
+      Exempt from FreeCam protection only (they can still see underground
+      blocks). When explicitly set, overrides fpantifreecam.bypass for FreeCam.
+    default: false
+  fpantifreecam.bypass.xray:
+    description: >
+      Exempt from Anti-Xray only (real ores are always sent). When explicitly
+      set, overrides fpantifreecam.bypass for Anti-Xray.
     default: false
   fpantifreecam.alerts:
     description: >
