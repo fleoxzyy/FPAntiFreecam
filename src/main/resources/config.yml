@@ -282,12 +282,12 @@ performance:
     chunk-radius: 4
 
 # ── Freecam mod detection ────────────────────────────────────────────
-# On join, a hidden anvil opens for a moment to check for the Freecam mod. Once per join.
+# On join, a hidden sign editor opens and closes for a moment to check for the Freecam mod. Once per join.
 freecam-detection:
   enabled: true
 
-  # Ticks the anvil stays open (20 = 1 second).
-  probe-timeout-ticks: 5
+  # Ticks to wait for the answer, plus the player's ping (20 = 1 second). At least 60.
+  probe-timeout-ticks: 60
 
   # Debug info about each check in console.
   debug: false

@@ -41,7 +41,7 @@ It works on the packets the server sends, so nothing in your world is changed. T
 - **Anti-Xray:** ores stay hidden until you can actually see them, including from the F5 camera. Ore lists and height ranges can be set per world.
 - **Entity hiding:** mobs and item frames inside hidden areas are hidden too (`chunk` mode, default). `raycast` mode also hides entities behind walls everywhere, like an ESP blocker, and can include players. The tab list is untouched.
 - **Hides more than blocks:** chests, signs, spawners, mobs, item frames, particles and sounds in hidden areas are hidden too, so the F3 pie chart and ESP mods can't find a base.
-- **Freecam mod detection (Paper):** checks on join whether the client has the Freecam mod installed, and runs the commands you choose (kick, ban, alert staff).
+- **Freecam mod detection:** checks on join whether the client has the Freecam mod installed, and runs the commands you choose (kick, ban, alert staff).
 - **Bedrock support:** works with Geyser and Floodgate.
 - **Folia support:** every check runs on the region thread that owns the area.
 - **Light on the network:** chunk refreshes are spread over ticks, and ore reveals are sent as small block updates, never whole chunks.
@@ -370,12 +370,12 @@ performance:
     chunk-radius: 4
 
 # ── Freecam mod detection ────────────────────────────────────────────
-# On join, a hidden anvil opens for a moment to check for the Freecam mod. Once per join.
+# On join, a hidden sign editor opens and closes for a moment to check for the Freecam mod. Once per join.
 freecam-detection:
   enabled: true
 
-  # Ticks the anvil stays open (20 = 1 second).
-  probe-timeout-ticks: 5
+  # Ticks to wait for the answer, plus the player's ping (20 = 1 second). At least 60.
+  probe-timeout-ticks: 60
 
   # Debug info about each check in console.
   debug: false

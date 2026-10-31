@@ -293,6 +293,15 @@ public final class ChunkListener implements PacketListener {
         UUID uuid = user.getUUID();
         if (uuid == null) return;
 
+        // NEW: the Freecam check's fake sign (block + text) must reach the
+        // client as a sign, never as void-y / Smart Fill / Anti-Xray rock.
+        if (type == PacketType.Play.Server.BLOCK_CHANGE || type == PacketType.Play.Server.BLOCK_ENTITY_DATA) {
+            FreecamDetector detector = plugin.getFreecamDetector();
+            if (detector != null && detector.hasPendingProbe(uuid) && isFreecamProbePacket(event, uuid, type, detector)) {
+                return;
+            }
+        }
+
         // NEW: line-of-sight EntityHider, Netty side. Runs before every
         // world/protection gate, because LOS hiding works in every world.
         EntityHider hider = plugin.getEntityHider();
@@ -405,6 +414,18 @@ public final class ChunkListener implements PacketListener {
     @Override
     public void onPacketReceive(PacketReceiveEvent event) {
         // No inbound packets need modification
+    }
+
+    private static boolean isFreecamProbePacket(PacketSendEvent event, UUID uuid, PacketType.Play.Server type,
+                                                FreecamDetector detector) {
+        try {
+            Vector3i pos = type == PacketType.Play.Server.BLOCK_CHANGE
+                    ? new WrapperPlayServerBlockChange(event).getBlockPosition()
+                    : new WrapperPlayServerBlockEntityData(event).getPosition();
+            return pos != null && detector.isProbeBlock(uuid, pos);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     // ── Anti-Xray pass (NEW) ──────────────────────────────────────────────

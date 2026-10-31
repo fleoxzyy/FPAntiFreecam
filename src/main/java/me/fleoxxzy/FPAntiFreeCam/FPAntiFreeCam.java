@@ -363,11 +363,13 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         bedrockSupport  = new BedrockSupport(this);
         entityHider     = new EntityHider(this);
         updateChecker   = new UpdateChecker(this);
-        // Freecam detection needs Paper's anvil + Adventure API; not available on plain Spigot.
-        if (PlatformUtil.isPaper()) {
+        // NEW: Freecam detection uses a sign editor sent through PacketEvents,
+        // so it no longer needs Paper's anvil API and runs on Spigot too.
+        try {
             freecamDetector = new FreecamDetector(this);
-        } else {
-            getLogger().info("[FPAntiFreeCam] Freecam mod detection requires Paper and is disabled on Spigot.");
+        } catch (Throwable t) {
+            getLogger().warning("[FPAntiFreeCam] Freecam mod detection unavailable: "
+                    + t.getClass().getSimpleName() + ": " + t.getMessage());
         }
         smartFillReveal = new SmartFillReveal(this);
         // NEW: marks flood fills dirty when a nearby wall opens up.
@@ -610,9 +612,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     /**
      * NEW: Freecam-mod detection is Java-Edition-only by nature (Fabric/Forge
      * client mods) — Bedrock players connected through Geyser/Floodgate can
-     * never have one installed, and probing them with a Java anvil GUI trick
-     * risks a broken/confusing UI flash since Geyser's anvil translation
-     * wasn't built for this use case. FreecamDetector uses this to skip them.
+     * never have one installed, and probing them with a Java sign editor trick
+     * risks a broken/confusing UI flash since Geyser's translation wasn't
+     * built for this use case. FreecamDetector uses this to skip them.
      */
     public boolean isBedrockPlayer(Player player) {
         return bedrockSupport != null && bedrockSupport.isBedrock(player);
@@ -659,6 +661,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public AntiXrayEngine  getAntiXrayEngine()      { return antiXrayEngine; }
     public AntiXrayReveal  getAntiXrayReveal()      { return antiXrayReveal; }
     public EntityHider getEntityHider()             { return entityHider; }
+    FreecamDetector getFreecamDetector()            { return freecamDetector; }
     public int     getSmartFillCeilingY()           { return smartFillCeilingY; }
     public int     getSmartFillMinCover()           { return smartFillMinCover; }
 
@@ -2187,8 +2190,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 entityHider == null || !entityHider.isEnabled() ? off
                         : lang(entityHider.isRaycastMode() ? "reload-entities-raycast" : "reload-entities-chunk")));
         ChatUtil.sendRaw(sender, lang("reload-mod-check",
-                freecamDetector == null ? lang("reload-mod-check-paper")
-                        : freecamDetector.isEnabled() ? on : off));
+                freecamDetector != null && freecamDetector.isEnabled() ? on : off));
         return true;
     }
 

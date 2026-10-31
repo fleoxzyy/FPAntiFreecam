@@ -33,7 +33,6 @@ messages:
   reload-entities-chunk: "chunk"
   reload-entities-raycast: "raycast"
   reload-mod-check: "&7  Freecam mod check: &b{0}"
-  reload-mod-check-paper: "&8needs Paper"
   reload-none: "&8none"
   reload-on: "&aon"
   reload-xray-off: "&8off"
