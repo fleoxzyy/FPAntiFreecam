@@ -56,12 +56,7 @@ public final class AntiXrayReveal implements Listener {
     private final FPAntiFreeCam plugin;
     private final AntiXrayEngine engine;
 
-    /** F5 camera distance (vanilla third-person distance). */
-    private static final double CAMERA_DISTANCE = 4.0;
-    /** How far a clipped camera is pulled back in front of the wall it hit. */
-    private static final double CAMERA_CLIP_MARGIN = 0.2;
-    private static final double SKIP_MOVE_SQ = 0.5 * 0.5;
-    private static final double SKIP_TURN_COS = Math.cos(Math.toRadians(10));
+    private static final double SKIP_TURN_COS = SightRaycaster.SKIP_TURN_COS;
     /** Block events re-check ores this many blocks around the changed block. */
     private static final int EVENT_RADIUS = 2;
     /** Corner sample points are pulled this far toward the face center. */
@@ -107,7 +102,7 @@ public final class AntiXrayReveal implements Listener {
 
         int gen = px.gen.get();
         if (!px.incomplete && gen == px.lastGen && px.lastCams != null
-                && camerasClose(px.lastCams, cams)
+                && SightRaycaster.camerasClose(px.lastCams, cams)
                 && look.getX() * px.lastLookX + look.getY() * px.lastLookY + look.getZ() * px.lastLookZ >= SKIP_TURN_COS) {
             return;
         }
@@ -224,47 +219,11 @@ public final class AntiXrayReveal implements Listener {
                 + " in " + packets + " block-change packets");
     }
 
-    /**
-     * The eye, plus (F5-aware) a camera 4 blocks behind and in front of it.
-     * The third-person ones are pulled back toward the eye if a solid block
-     * is in the way, like the vanilla camera does. Otherwise a wall behind
-     * the player would put a camera inside the rock, where it could see
-     * caves the player can't.
-     */
+    /** Camera positions shared with the EntityHider (see SightRaycaster#cameras). */
     private double[] cameras(World world, AntiXrayEngine.WorldMeta meta, boolean folia,
                              double ex, double ey, double ez, Vector look) {
-        if (!engine.isF5Aware()) return new double[]{ ex, ey, ez };
-        double lx = look.getX(), ly = look.getY(), lz = look.getZ();
-        double back = clip(world, meta, folia, ex, ey, ez, -lx, -ly, -lz);
-        double front = clip(world, meta, folia, ex, ey, ez, lx, ly, lz);
-        return new double[]{
-                ex, ey, ez,
-                ex - lx * back, ey - ly * back, ez - lz * back,
-                ex + lx * front, ey + ly * front, ez + lz * front
-        };
-    }
-
-    private double clip(World world, AntiXrayEngine.WorldMeta meta, boolean folia,
-                        double ox, double oy, double oz, double dx, double dy, double dz) {
-        double[] hit = { -1 };
-        int[] budget = { 64 };
-        int r = SightRaycaster.walk(world, meta.minY, meta.maxY, folia, ox, oy, oz, dx, dy, dz,
-                CAMERA_DISTANCE, budget, (x, y, z, type, blocks, t) -> {
-                    if (!blocks || t <= 0) return true; // the eye's own cell never clips
-                    hit[0] = t;
-                    return false;
-                });
-        if (r == SightRaycaster.HIT_BLOCK && hit[0] >= 0) return Math.max(0, hit[0] - CAMERA_CLIP_MARGIN);
-        return CAMERA_DISTANCE; // open air, or above/below the world (also open air)
-    }
-
-    private static boolean camerasClose(double[] a, double[] b) {
-        if (a.length != b.length) return false;
-        for (int i = 0; i < a.length; i += 3) {
-            double dx = a[i] - b[i], dy = a[i + 1] - b[i + 1], dz = a[i + 2] - b[i + 2];
-            if (dx * dx + dy * dy + dz * dz >= SKIP_MOVE_SQ) return false;
-        }
-        return true;
+        return SightRaycaster.cameras(world, meta.minY, meta.maxY, folia, engine.isF5Aware(),
+                ex, ey, ez, look.getX(), look.getY(), look.getZ());
     }
 
     /**
@@ -444,6 +403,10 @@ public final class AntiXrayReveal implements Listener {
                 plugin.dbg("Anti-Xray reveal packet failed for " + player.getName() + ": " + e.getMessage());
             }
         }
+        // NEW: block entities of revealed blocks were held back while they were
+        // faked (ChunkListener), send them now. Ores without one cost a lookup.
+        World world = player.getWorld();
+        for (int[] r : reveals) BlockEntityResender.resend(player, world, r[0], r[1], r[2]);
         return packets;
     }
 

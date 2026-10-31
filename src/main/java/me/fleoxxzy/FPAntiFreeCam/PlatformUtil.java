@@ -40,44 +40,66 @@ public final class PlatformUtil {
     private static Method entitySchedulerRun;
     private static Method entitySchedulerRunDelayed;
 
+    // BUGFIX (Folia): methods are looked up on the public scheduler
+    // interfaces. Folia's implementation classes (and its task classes) can
+    // be private, and reflection through them fails with IllegalAccessException.
+    private static Class<?> foliaType(String simpleName, Object fallback) {
+        try {
+            return Class.forName("io.papermc.paper.threadedregions.scheduler." + simpleName);
+        } catch (Throwable t) {
+            return fallback != null ? fallback.getClass() : null;
+        }
+    }
+
+    private static Method taskCancel;
+    private static Method taskIsCancelled;
+
     static {
         try {
             globalRegionScheduler = Bukkit.class.getMethod("getGlobalRegionScheduler").invoke(null);
             if (globalRegionScheduler != null) {
-                Class<?> cls = globalRegionScheduler.getClass();
+                Class<?> cls = foliaType("GlobalRegionScheduler", globalRegionScheduler);
                 globalRegionRun = cls.getMethod("run", Plugin.class, Consumer.class);
                 globalRegionRunDelayed = cls.getMethod("runDelayed", Plugin.class, Consumer.class, long.class);
                 globalRegionRunAtFixedRate = cls.getMethod("runAtFixedRate", Plugin.class, Consumer.class, long.class, long.class);
             }
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
 
         try {
             regionScheduler = Bukkit.class.getMethod("getRegionScheduler").invoke(null);
             if (regionScheduler != null) {
-                regionRun = regionScheduler.getClass().getMethod("run", Plugin.class, Location.class, Consumer.class);
+                regionRun = foliaType("RegionScheduler", regionScheduler)
+                        .getMethod("run", Plugin.class, Location.class, Consumer.class);
             }
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
 
         try {
             asyncScheduler = Bukkit.class.getMethod("getAsyncScheduler").invoke(null);
             if (asyncScheduler != null) {
-                asyncRunNow = asyncScheduler.getClass().getMethod("runNow", Plugin.class, Consumer.class);
+                asyncRunNow = foliaType("AsyncScheduler", asyncScheduler)
+                        .getMethod("runNow", Plugin.class, Consumer.class);
             }
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
+
+        try {
+            Class<?> task = Class.forName("io.papermc.paper.threadedregions.scheduler.ScheduledTask");
+            taskCancel = task.getMethod("cancel");
+            taskIsCancelled = task.getMethod("isCancelled");
+        } catch (Throwable ignored) {}
 
         try {
             isOwnedByCurrentRegionMethod = Bukkit.class.getMethod("isOwnedByCurrentRegion", Location.class);
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
         try {
             isOwnedByCurrentRegionEntityMethod = Bukkit.class.getMethod("isOwnedByCurrentRegion", org.bukkit.entity.Entity.class);
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
 
         try {
             entityGetScheduler = Class.forName("org.bukkit.entity.Entity").getMethod("getScheduler");
             Class<?> entitySchedulerCls = entityGetScheduler.getReturnType();
             entitySchedulerRun = entitySchedulerCls.getMethod("run", Plugin.class, Consumer.class, Runnable.class);
             entitySchedulerRunDelayed = entitySchedulerCls.getMethod("runDelayed", Plugin.class, Consumer.class, Runnable.class, long.class);
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
     }
 
     private PlatformUtil() {}
@@ -122,12 +144,17 @@ public final class PlatformUtil {
     /** Sends an action bar message (already colour-translated legacy text). */
     @SuppressWarnings("deprecation")
     public static void sendActionBar(Player player, String legacyMessage) {
+        // BUGFIX: Paper's sendActionBar(String) is deprecated and may be
+        // removed. If it's gone (NoSuchMethodError), use the Spigot way,
+        // which Paper also has.
         if (isPaper()) {
-            player.sendActionBar(legacyMessage);
-        } else {
-            player.spigot().sendMessage(net.md_5.bungee.api.ChatMessageType.ACTION_BAR,
-                    net.md_5.bungee.api.chat.TextComponent.fromLegacyText(legacyMessage));
+            try {
+                player.sendActionBar(legacyMessage);
+                return;
+            } catch (Throwable ignored) {}
         }
+        player.spigot().sendMessage(net.md_5.bungee.api.ChatMessageType.ACTION_BAR,
+                net.md_5.bungee.api.chat.TextComponent.fromLegacyText(legacyMessage));
     }
 
     /** Server TPS (1m, 5m, 15m), or null where the platform doesn't expose it. */
@@ -212,6 +239,9 @@ public final class PlatformUtil {
                 plugin.getLogger().warning("[FPAntiFreeCam] Folia GlobalRegionScheduler failed, falling back: " + e.getMessage());
             }
         }
+        // BUGFIX (Folia): Folia's Bukkit scheduler throws on every call, so the
+        // fallbacks below are skipped there (the warning above is enough).
+        if (isFolia()) return;
         Bukkit.getScheduler().runTask(plugin, task);
     }
 
@@ -226,6 +256,7 @@ public final class PlatformUtil {
                 plugin.getLogger().warning("[FPAntiFreeCam] Folia RegionScheduler failed, falling back: " + e.getMessage());
             }
         }
+        if (isFolia()) return;
         Bukkit.getScheduler().runTask(plugin, task);
     }
 
@@ -255,6 +286,7 @@ public final class PlatformUtil {
                 plugin.getLogger().warning("[FPAntiFreeCam] Folia EntityScheduler failed, falling back: " + e.getMessage());
             }
         }
+        if (isFolia()) return;
         Bukkit.getScheduler().runTask(plugin, task);
     }
 
@@ -318,6 +350,7 @@ public final class PlatformUtil {
                 plugin.getLogger().warning("[FPAntiFreeCam] Folia delayed task failed, falling back: " + e.getMessage());
             }
         }
+        if (isFolia()) return NO_OP_TASK;
         return Bukkit.getScheduler().runTaskLater(plugin, task, delayTicks);
     }
 
@@ -336,6 +369,7 @@ public final class PlatformUtil {
                 plugin.getLogger().warning("[FPAntiFreeCam] Folia task timer failed, falling back: " + e.getMessage());
             }
         }
+        if (isFolia()) return NO_OP_TASK;
         return Bukkit.getScheduler().runTaskTimer(plugin, task, delayTicks, periodTicks);
     }
 
@@ -359,6 +393,7 @@ public final class PlatformUtil {
         }
         // Only safe as a fallback on non-Folia platforms where the legacy
         // scheduler's async methods still function normally.
+        if (isFolia()) return;
         Bukkit.getScheduler().runTaskAsynchronously(plugin, task);
     }
 
@@ -416,15 +451,17 @@ public final class PlatformUtil {
         @Override
         public boolean isCancelled() {
             try {
-                return (Boolean) foliaTask.getClass().getMethod("isCancelled").invoke(foliaTask);
-            } catch (Exception e) { return false; }
+                Method m = taskIsCancelled != null ? taskIsCancelled : foliaTask.getClass().getMethod("isCancelled");
+                return (Boolean) m.invoke(foliaTask);
+            } catch (Throwable e) { return false; }
         }
 
         @Override
         public void cancel() {
             try {
-                foliaTask.getClass().getMethod("cancel").invoke(foliaTask);
-            } catch (Exception ignored) {}
+                Method m = taskCancel != null ? taskCancel : foliaTask.getClass().getMethod("cancel");
+                m.invoke(foliaTask);
+            } catch (Throwable ignored) {}
         }
     }
 }

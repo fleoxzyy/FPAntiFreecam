@@ -94,20 +94,62 @@ public final class SmartFillEngine {
     }
 
     /**
+     * NEW (follow-terrain): blocks that count as natural cover above a spot.
+     * Blocks players often build with (cobblestone, packed mud, and Nether /
+     * End blocks in the Overworld) don't count, nor do planks, glass, logs
+     * or leaves, so builds and trees never count as "underground".
+     */
+    private static final Set<StateType> NATURAL_COVER_TYPES;
+    static {
+        Set<StateType> s = new HashSet<>(TERRAIN_TYPES);
+        s.remove(StateTypes.COBBLESTONE);
+        s.remove(StateTypes.COBBLED_DEEPSLATE);
+        s.remove(StateTypes.PACKED_MUD);
+        s.remove(StateTypes.NETHERRACK);
+        s.remove(StateTypes.BLACKSTONE);
+        s.remove(StateTypes.BASALT);
+        s.remove(StateTypes.SOUL_SAND);
+        s.remove(StateTypes.SOUL_SOIL);
+        s.remove(StateTypes.END_STONE);
+        s.addAll(SURFACE_ONLY_SAFE_TYPES);
+        s.remove(StateTypes.FARMLAND);
+        s.add(StateTypes.COAL_ORE);     s.add(StateTypes.DEEPSLATE_COAL_ORE);
+        s.add(StateTypes.IRON_ORE);     s.add(StateTypes.DEEPSLATE_IRON_ORE);
+        s.add(StateTypes.COPPER_ORE);   s.add(StateTypes.DEEPSLATE_COPPER_ORE);
+        s.add(StateTypes.GOLD_ORE);     s.add(StateTypes.DEEPSLATE_GOLD_ORE);
+        s.add(StateTypes.REDSTONE_ORE); s.add(StateTypes.DEEPSLATE_REDSTONE_ORE);
+        s.add(StateTypes.LAPIS_ORE);    s.add(StateTypes.DEEPSLATE_LAPIS_ORE);
+        s.add(StateTypes.DIAMOND_ORE);  s.add(StateTypes.DEEPSLATE_DIAMOND_ORE);
+        s.add(StateTypes.EMERALD_ORE);  s.add(StateTypes.DEEPSLATE_EMERALD_ORE);
+        s.add(StateTypes.RAW_IRON_BLOCK);
+        s.add(StateTypes.RAW_COPPER_BLOCK);
+        NATURAL_COVER_TYPES = Collections.unmodifiableSet(s);
+    }
+
+    /**
+     * Follow-terrain edge margin: a column only counts as covered at a height
+     * if every column within this many blocks is covered there too. Keeps
+     * cliff faces, overhang edges, thin walls and cave mouths real.
+     */
+    private static final int EDGE_MARGIN = 3;
+
+    /**
      * Blocks that must NEVER be masked, on top of TERRAIN_TYPES (which are
      * already safe since they're generic rock/dirt). BEDROCK because a
      * client noticing "diggable bedrock" is an instant giveaway and can also
-     * break client-side world-border/height assumptions; WATER/LAVA because
-     * swapping a real fluid block for a solid one changes fall/swim physics
-     * predictions client-side and causes rubber-banding the moment the real
-     * block is revealed underneath.
+     * break client-side world-border/height assumptions.
+     *
+     * <p>BUGFIX: WATER/LAVA used to be here too (physics worries), so every
+     * aquifer, lava lake and flooded cave under a roof stayed visible in
+     * freecam. The near radius and the flood fill always keep fluids real
+     * around the player, the same as air, and the hard floor already masked
+     * them. Open water (oceans, lakes, rivers) is still never touched: fluids
+     * don't count as a roof, and neither does ice now (frozen oceans).
      */
     private static final Set<StateType> NEVER_MASK_EXTRA;
     static {
         Set<StateType> s = new HashSet<>();
         s.add(StateTypes.BEDROCK);
-        s.add(StateTypes.WATER);
-        s.add(StateTypes.LAVA);
         NEVER_MASK_EXTRA = Collections.unmodifiableSet(s);
     }
 
@@ -203,6 +245,8 @@ public final class SmartFillEngine {
         s.add("redstone_torch"); s.add("redstone_wall_torch"); s.add("redstone_wire");
         s.add("rail"); s.add("powered_rail"); s.add("detector_rail"); s.add("activator_rail");
         s.add("cobweb"); s.add("scaffolding");
+        // Mangrove roots let water and light through; swamp water under them isn't a cave.
+        s.add("mangrove_roots");
         NON_ROOF_KEYS = Collections.unmodifiableSet(s);
     }
 
@@ -230,6 +274,9 @@ public final class SmartFillEngine {
                 || type == StateTypes.WATER || type == StateTypes.LAVA) {
             return true;
         }
+        // BUGFIX: see-through ice over a frozen ocean isn't a roof. Now that
+        // fluids can be masked, the water under it would turn to stone.
+        if (type == StateTypes.ICE || type == StateTypes.FROSTED_ICE) return true;
         String key = registryKey(type);
         if (key == null) return false;
         if (NON_ROOF_KEYS.contains(key)) return true;
@@ -303,6 +350,49 @@ public final class SmartFillEngine {
          * generic/default palettes, same reasoning as topSolidY.
          */
         final int[] shallowPocketFloorY;
+
+        /**
+         * IMPROVEMENT: fill block per 4×4×4 cell (index si * 64 + sx | sy << 2
+         * | sz << 4), the most common real rock in and around that cell.
+         * Value k > 0 means cellStates[k - 1]; 0 (or a null array, for
+         * default palettes) falls back to the band mix.
+         */
+        byte[] cellIndex;
+        WrappedBlockState[] cellStates;
+
+        /**
+         * NEW (follow-terrain): per column (lz * 16 + lx), the highest Y with
+         * enough natural cover above it, after the edge margin. Masking in
+         * that column reaches max(ceiling-y, coverTop). Null when no column
+         * reaches above ceiling-y (and always when follow-terrain is off).
+         */
+        short[] coverTop;
+        int maxCover = Integer.MIN_VALUE;
+
+        /** Cover before the edge margin, kept for the neighbour chunks' margin. */
+        short[] coverRaw;
+
+        /**
+         * Reveal side bound, at least coverTop and never lowered while this
+         * column stays cached (a rebuild keeps the old values), so the reveal
+         * always reaches every block a client may still have masked.
+         */
+        short[] revealTop;
+        int maxReveal = Integer.MIN_VALUE;
+
+        /**
+         * Neighbour chunks (bit (dx + 1) * 3 + (dz + 1)) that weren't cached
+         * when the edge margin was worked out. When one of them is built,
+         * this palette is marked stale so the next send uses the real edge.
+         */
+        int guessedNeighbours;
+
+        /**
+         * Set by {@link #invalidate}. A stale palette is rebuilt on the next
+         * chunk send but still answers block changes until then, so they
+         * match what the client was sent.
+         */
+        volatile boolean stale;
 
         ColumnPalette(WeightedPalette[] bandPalettes, int[] topSolidY, int[] shallowPocketFloorY, int minY) {
             this.bandPalettes = bandPalettes;
@@ -383,25 +473,55 @@ public final class SmartFillEngine {
      * @return the palette, or a depth/dimension default palette if no blocks found.
      */
     public ColumnPalette getOrBuildPalette(String worldName, int chunkX, int chunkZ,
-                                            BaseChunk[] sections, int minY, int ceilingY) {
+                                            BaseChunk[] sections, int minY, int ceilingY,
+                                            boolean followTerrain) {
         long key = chunkColumnKey(chunkX, chunkZ);
         ConcurrentHashMap<Long, ColumnPalette> cache = worldCaches.computeIfAbsent(
                 worldName, k -> new ConcurrentHashMap<>());
 
         ColumnPalette existing = cache.get(key);
-        if (existing != null) return existing;
+        if (existing != null && !existing.stale) return existing;
 
-        ColumnPalette built = buildPalette(sections, minY, ceilingY,
-                plugin.getSmartFillSampleRadius(), plugin.getSmartFillMaxPaletteSize());
+        ColumnPalette built = buildPalette(worldName, chunkX, chunkZ, sections, minY, ceilingY,
+                plugin.getSmartFillSampleRadius(), plugin.getSmartFillMaxPaletteSize(), followTerrain);
 
         if (built == null) {
             built = getDefaultPalette(worldName, minY, sections.length);
         }
 
         if (built != null) {
+            if (existing != null) keepReveal(built, existing);
             cache.put(key, built);
+            if (built.coverRaw != null) {
+                // Neighbours that guessed "no cover" for this chunk's side
+                // get the real edge on their next send.
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        if (dx == 0 && dz == 0) continue;
+                        ColumnPalette n = cache.get(chunkColumnKey(chunkX + dx, chunkZ + dz));
+                        if (n != null && (n.guessedNeighbours & (1 << ((1 - dx) * 3 + (1 - dz)))) != 0) {
+                            n.stale = true;
+                        }
+                    }
+                }
+            }
         }
         return built;
+    }
+
+    /** Other players may still have the old masking: the reveal bound only grows. */
+    private static void keepReveal(ColumnPalette built, ColumnPalette old) {
+        short[] o = old.revealTop;
+        if (o == null) return;
+        short[] n = built.revealTop;
+        if (n == null) {
+            built.revealTop = o; // never written after publishing, safe to share
+        } else {
+            short[] m = new short[256];
+            for (int i = 0; i < 256; i++) m[i] = (short) Math.max(n[i], o[i]);
+            built.revealTop = m;
+        }
+        built.maxReveal = Math.max(built.maxReveal, old.maxReveal);
     }
 
     /**
@@ -420,7 +540,10 @@ public final class SmartFillEngine {
      * Same (x, y, z) always returns the same block — no flicker across re-sends.
      */
     public WrappedBlockState selectState(ColumnPalette palette, int blockX, int blockY, int blockZ) {
+        WrappedBlockState cell = cellState(palette, blockX, blockY, blockZ);
+        if (cell != null) return cell;
         WeightedPalette band = palette.bandFor(blockY);
+        if (palette.cellIndex != null) return band.states[0];
         return band.states[selectIndex(band, blockX, blockY, blockZ)];
     }
 
@@ -430,8 +553,22 @@ public final class SmartFillEngine {
      * For MULTI_BLOCK_CHANGE / BLOCK_CHANGE which use integer block IDs.
      */
     public int selectId(ColumnPalette palette, int blockX, int blockY, int blockZ) {
+        WrappedBlockState cell = cellState(palette, blockX, blockY, blockZ);
+        if (cell != null) return cell.getGlobalId();
         WeightedPalette band = palette.bandFor(blockY);
+        if (palette.cellIndex != null) return band.globalIds[0];
         return band.globalIds[selectIndex(band, blockX, blockY, blockZ)];
+    }
+
+    private static WrappedBlockState cellState(ColumnPalette palette, int x, int y, int z) {
+        byte[] cells = palette.cellIndex;
+        if (cells == null) return null;
+        int ry = y - palette.minY;
+        if (ry < 0) return null;
+        int idx = (ry >> 4) * 64 + (((x & 15) >> 2) | ((ry & 15) >> 2) << 2 | ((z & 15) >> 2) << 4);
+        if (idx >= cells.length) return null;
+        int k = cells[idx];
+        return k > 0 ? palette.cellStates[k - 1] : null;
     }
 
     /**
@@ -477,10 +614,141 @@ public final class SmartFillEngine {
         return worldY >= floorY && worldY <= roofY;
     }
 
-    /** Invalidate a specific column's cached palette (e.g. after a real block change). */
+    /**
+     * Invalidate a specific column's cached palette (e.g. after a real block change).
+     * BUGFIX: the palette used to be dropped, so block changes until the
+     * next chunk send were filled without the open-sky check or the rock
+     * map (stone could appear over open water). It is now only marked stale.
+     */
     public void invalidate(String worldName, int chunkX, int chunkZ) {
         ConcurrentHashMap<Long, ColumnPalette> cache = worldCaches.get(worldName);
-        if (cache != null) cache.remove(chunkColumnKey(chunkX, chunkZ));
+        if (cache == null) return;
+        ColumnPalette p = cache.get(chunkColumnKey(chunkX, chunkZ));
+        if (p != null) p.stale = true;
+    }
+
+    // ── Follow-terrain lookups ────────────────────────────────────────────
+
+    /** Masking top of a column: ceiling-y, or higher where it has natural cover. */
+    static int maskTop(ColumnPalette p, int lx, int lz, int ceilingY) {
+        if (p == null || p.coverTop == null) return ceilingY;
+        return Math.max(ceilingY, p.coverTop[(lz << 4) | lx]);
+    }
+
+    /** Highest masking top of any column in the chunk. */
+    static int chunkMaskTop(ColumnPalette p, int ceilingY) {
+        if (p == null || p.coverTop == null) return ceilingY;
+        return Math.max(ceilingY, p.maxCover);
+    }
+
+    /** Reveal-side top of a column (at least {@link #maskTop}). */
+    static int revealTop(ColumnPalette p, int lx, int lz, int ceilingY) {
+        if (p == null || p.revealTop == null) return ceilingY;
+        return Math.max(ceilingY, p.revealTop[(lz << 4) | lx]);
+    }
+
+    /** True if a change to this block type can change a column's natural cover. */
+    static boolean affectsCover(StateType type) {
+        return type == null || type.isAir() || NATURAL_COVER_TYPES.contains(type);
+    }
+
+    /**
+     * Follow-terrain: a block change above ceiling-y at or just above the
+     * column's roof can change its cover (mining into a mountain, a new
+     * roof), so the palette must be rebuilt.
+     */
+    static boolean coverMayChange(ColumnPalette p, int lx, int lz, int y, int ceilingY) {
+        if (p == null || p.topSolidY == null || y <= ceilingY) return false;
+        return y <= p.topSolidY[(lz << 4) | lx] + 1;
+    }
+
+    /**
+     * Highest masking (or, with reveal, reveal) top across a range of chunk
+     * columns. Never lower than ceilingY. Any thread.
+     */
+    public int maxTopInRange(String worldName, int cx0, int cz0, int cx1, int cz1, int ceilingY, boolean reveal) {
+        ConcurrentHashMap<Long, ColumnPalette> cache = worldCaches.get(worldName);
+        if (cache == null || cache.isEmpty()) return ceilingY;
+        int top = ceilingY;
+        for (int cx = cx0; cx <= cx1; cx++) {
+            for (int cz = cz0; cz <= cz1; cz++) {
+                ColumnPalette p = cache.get(chunkColumnKey(cx, cz));
+                if (p == null) continue;
+                int t = reveal ? (p.revealTop != null ? p.maxReveal : Integer.MIN_VALUE)
+                               : (p.coverTop != null ? p.maxCover : Integer.MIN_VALUE);
+                if (t > top) top = t;
+            }
+        }
+        return top;
+    }
+
+    /** Per-block reveal-top lookups for the flood fill and sight sweep. */
+    public CoverLookup coverLookup(String worldName, int ceilingY) {
+        return new CoverLookup(worldCaches.get(worldName), ceilingY);
+    }
+
+    /**
+     * NEW: small direct-mapped cache of each chunk's reveal tops, so a flood
+     * fill or a sight sweep does one map lookup per chunk instead of one per
+     * block. Single thread, short-lived.
+     */
+    public static final class CoverLookup {
+        private static final short[] NONE = new short[0];
+        private final ConcurrentHashMap<Long, ColumnPalette> cache;
+        private final int ceilingY;
+        // IMPROVEMENT: 16×16 chunk window, one slot per chunk. The old 64-slot
+        // hash put chunks 2 apart diagonally in the same slot, so a flood fill
+        // or sweep kept re-reading the palette map (~1% CPU on a weak host).
+        private final long[] keys = new long[256];
+        private final short[][] tops = new short[256][];
+        private final int[] maxes = new int[256];
+
+        CoverLookup(ConcurrentHashMap<Long, ColumnPalette> cache, int ceilingY) {
+            this.cache = cache;
+            this.ceilingY = ceilingY;
+        }
+
+        private int slot(int cx, int cz) {
+            long key = chunkColumnKey(cx, cz);
+            int slot = ((cx & 15) << 4) | (cz & 15);
+            if (tops[slot] == null || keys[slot] != key) {
+                ColumnPalette p = cache != null ? cache.get(key) : null;
+                short[] t = p != null ? p.revealTop : null;
+                keys[slot] = key;
+                tops[slot] = t != null ? t : NONE;
+                maxes[slot] = t != null ? Math.max(ceilingY, p.maxReveal) : ceilingY;
+            }
+            return slot;
+        }
+
+        /** Reveal tops of the chunk holding world (x, z), indexed ((z & 15) << 4) | (x & 15). Empty = none. */
+        public short[] columnTops(int x, int z) {
+            return tops[slot(x >> 4, z >> 4)];
+        }
+
+        /** Reveal top of the block column at world (x, z). */
+        public int top(int x, int z) {
+            short[] t = tops[slot(x >> 4, z >> 4)];
+            if (t == NONE) return ceilingY;
+            return Math.max(ceilingY, t[((z & 15) << 4) | (x & 15)]);
+        }
+
+        /** Highest reveal top in the chunk holding world (x, z). */
+        public int chunkTop(int x, int z) {
+            return maxes[slot(x >> 4, z >> 4)];
+        }
+
+        /** Highest reveal top in the chunks within r blocks of world (x, z) (at most 4 for r < 16). */
+        public int chunkTopAround(int x, int z, int r) {
+            int t = ceilingY;
+            for (int cx = (x - r) >> 4; cx <= (x + r) >> 4; cx++) {
+                for (int cz = (z - r) >> 4; cz <= (z + r) >> 4; cz++) {
+                    int m = maxes[slot(cx, cz)];
+                    if (m > t) t = m;
+                }
+            }
+            return t;
+        }
     }
 
     /** Clear all cached palettes (reload / disable). */
@@ -501,8 +769,10 @@ public final class SmartFillEngine {
      * Builds a per-section-band palette set by sampling terrain blocks
      * around each band, plus a per-column topSolidY sky-exposure map.
      */
-    private ColumnPalette buildPalette(BaseChunk[] sections, int minY, int ceilingY,
-                                        int sampleRadiusSections, int maxPaletteSize) {
+    private ColumnPalette buildPalette(String worldName, int chunkX, int chunkZ,
+                                        BaseChunk[] sections, int minY, int ceilingY,
+                                        int sampleRadiusSections, int maxPaletteSize,
+                                        boolean followTerrain) {
 
         // BUGFIX: compute the real topmost-ROOFING-block height for every
         // column in the FULL vertical chunk (sections covers the whole
@@ -562,6 +832,29 @@ public final class SmartFillEngine {
             }
         }
 
+        short[] coverRaw = null;
+        short[] coverTop = null;
+        int maxCover = Integer.MIN_VALUE;
+        int[] guessed = { 0 };
+        if (followTerrain) {
+            try {
+                coverRaw = scanCover(sections, minY, topSolidY, ceilingY, plugin.getSmartFillMinCover());
+                int rawMax = Integer.MIN_VALUE;
+                for (short v : coverRaw) if (v > rawMax) rawMax = v;
+                if (rawMax <= ceilingY) {
+                    coverRaw = null; // flat here: neighbours read null as "no cover"
+                } else {
+                    coverTop = applyEdgeMargin(worldName, chunkX, chunkZ, coverRaw, ceilingY, guessed);
+                    for (short v : coverTop) if (v > maxCover) maxCover = v;
+                    if (maxCover <= ceilingY) coverTop = null; // only thin edges above ceiling-y
+                }
+            } catch (Exception e) {
+                coverRaw = null;
+                coverTop = null; // ceiling-y only
+                guessed[0] = 0;
+            }
+        }
+        int topY = coverTop != null ? maxCover : ceilingY;
         // BUGFIX: this used to hardcode "64" as the top of the sampling range
         // no matter what protection-y/ceiling-y was actually configured, so a
         // server running a custom ceiling either sampled way past real
@@ -572,7 +865,7 @@ public final class SmartFillEngine {
         // that so the palette also picks up a bit of the real terrain just
         // past the camouflage boundary for a more natural blend.
         int startSection = 0;
-        int ceilingSection = Math.max(0, (ceilingY - minY) / 16);
+        int ceilingSection = Math.max(0, Math.min(sections.length - 1, (topY - minY) / 16));
         int endSection = Math.min(sections.length - 1, ceilingSection + Math.max(0, sampleRadiusSections));
 
         // BUGFIX: see ColumnPalette's javadoc — build one palette PER section
@@ -589,34 +882,61 @@ public final class SmartFillEngine {
         AntiXrayEngine xray = plugin.getAntiXrayEngine();
         boolean excludeOres = xray != null && xray.isEnabled();
 
+        // IMPROVEMENT: each section is counted once (block ids, type check
+        // cached per id) and the bands add up their window, instead of every
+        // band reading all blocks of up to 3 sections again. Same result.
+        @SuppressWarnings("unchecked")
+        Map<Integer, Integer>[] sectionFreq = new Map[sections.length];
+        Map<Integer, WrappedBlockState> idToState = new HashMap<>();
+        Map<Integer, Boolean> sampleable = new HashMap<>();
+        int countFrom = Math.max(0, startSection - sampleRadiusSections);
+        int countTo = Math.min(sections.length - 1, endSection + sampleRadiusSections);
+        for (int s2 = countFrom; s2 <= countTo; s2++) {
+            BaseChunk section = sections[s2];
+            if (section == null || section.isEmpty()) continue;
+            Map<Integer, Integer> freq = new HashMap<>();
+            int lastId = Integer.MIN_VALUE;
+            boolean lastOk = false;
+            for (int ly = 0; ly < 16; ly++) {
+                for (int lx = 0; lx < 16; lx++) {
+                    for (int lz = 0; lz < 16; lz++) {
+                        try {
+                            int id = section.getBlockId(lx, ly, lz);
+                            boolean ok;
+                            if (id == lastId) {
+                                ok = lastOk;
+                            } else {
+                                Boolean known = sampleable.get(id);
+                                if (known == null) {
+                                    WrappedBlockState state = section.get(lx, ly, lz);
+                                    StateType type = state != null ? state.getType() : null;
+                                    known = type != null && TERRAIN_TYPES.contains(type)
+                                            && !(excludeOres && xray.isAnyHiddenOre(id));
+                                    if (known) idToState.putIfAbsent(id, state);
+                                    sampleable.put(id, known);
+                                }
+                                ok = known;
+                                lastId = id;
+                                lastOk = ok;
+                            }
+                            if (ok) freq.merge(id, 1, Integer::sum);
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+            if (!freq.isEmpty()) sectionFreq[s2] = freq;
+        }
+
         for (int si = startSection; si <= endSection; si++) {
-            Map<Integer, WrappedBlockState> idToState = new HashMap<>();
             Map<Integer, Integer> freq = new HashMap<>();
 
             int loSection = Math.max(0, si - sampleRadiusSections);
             int hiSection = Math.min(sections.length - 1, si + sampleRadiusSections);
 
             for (int s2 = loSection; s2 <= hiSection; s2++) {
-                BaseChunk section = sections[s2];
-                if (section == null || section.isEmpty()) continue;
-
-                for (int ly = 0; ly < 16; ly++) {
-                    for (int lx = 0; lx < 16; lx++) {
-                        for (int lz = 0; lz < 16; lz++) {
-                            try {
-                                WrappedBlockState state = section.get(lx, ly, lz);
-                                if (state == null) continue;
-                                StateType type = state.getType();
-                                if (type != null && TERRAIN_TYPES.contains(type)) {
-                                    int id = state.getGlobalId();
-                                    if (excludeOres && xray.isAnyHiddenOre(id)) continue;
-                                    freq.merge(id, 1, Integer::sum);
-                                    idToState.putIfAbsent(id, state);
-                                }
-                            } catch (Exception ignored) {}
-                        }
-                    }
-                }
+                Map<Integer, Integer> f = sectionFreq[s2];
+                if (f == null) continue;
+                for (Map.Entry<Integer, Integer> e : f.entrySet()) freq.merge(e.getKey(), e.getValue(), Integer::sum);
             }
 
             WeightedPalette band = toWeightedPalette(freq, idToState, maxPaletteSize);
@@ -635,7 +955,9 @@ public final class SmartFillEngine {
             if (fallback == null) return null;
             WeightedPalette single = singleBlockPalette(fallback);
             Arrays.fill(bandPalettes, single);
-            return new ColumnPalette(bandPalettes, topSolidY, shallowPocketFloorY, minY);
+            ColumnPalette flat = new ColumnPalette(bandPalettes, topSolidY, shallowPocketFloorY, minY);
+            setCover(flat, coverRaw, coverTop, maxCover, guessed[0]);
+            return flat;
         }
 
         // Nearest-neighbor fill for any band left null (its own local window
@@ -644,7 +966,276 @@ public final class SmartFillEngine {
         // instead of falling all the way back to a flat default.
         fillNearestBand(bandPalettes);
 
-        return new ColumnPalette(bandPalettes, topSolidY, shallowPocketFloorY, minY);
+        ColumnPalette result = new ColumnPalette(bandPalettes, topSolidY, shallowPocketFloorY, minY);
+        setCover(result, coverRaw, coverTop, maxCover, guessed[0]);
+        try {
+            buildCellMap(result, sections, Math.min(sections.length - 1, ceilingSection + 1),
+                    excludeOres ? xray : null);
+        } catch (Exception ignored) {
+            result.cellIndex = null; // band mix only
+        }
+        return result;
+    }
+
+    /**
+     * IMPROVEMENT: the fill used to pick each block from the band's weighted
+     * mix by position hash, so a cave inside plain stone could come out as a
+     * speckle of stone, deepslate, tuff and andesite, which stood out. Now
+     * every 4×4×4 cell uses the most common real rock in that cell. Cells
+     * that are all air (the cave itself) take the most common rock of the
+     * cells around them, growing inward up to 32 blocks. Anything left after
+     * that (a huge open cave) uses the band's most common rock instead of
+     * the speckled mix. Built once per palette (cached).
+     */
+    private static void buildCellMap(ColumnPalette palette, BaseChunk[] sections, int lastSection,
+                                     AntiXrayEngine xray) {
+        int cellsTotal = (lastSection + 1) * 64;
+        if (cellsTotal <= 0) return;
+        byte[] slotOf = new byte[cellsTotal];
+        int[] countOf = new int[cellsTotal];
+        List<WrappedBlockState> states = new ArrayList<>();
+        Map<Integer, Integer> idSlot = new HashMap<>(); // global id -> slot (1..127), 0 = not rock
+
+        int[] ids = new int[8], counts = new int[8];
+        for (int si = 0; si <= lastSection; si++) {
+            BaseChunk section = sections[si];
+            if (section == null || section.isEmpty()) continue;
+            for (int c = 0; c < 64; c++) {
+                int bx = (c & 3) << 2, by = ((c >> 2) & 3) << 2, bz = ((c >> 4) & 3) << 2;
+                int distinct = 0;
+                int lastId = Integer.MIN_VALUE, lastSlot = 0;
+                for (int ly = by; ly < by + 4; ly++) {
+                    for (int lx = bx; lx < bx + 4; lx++) {
+                        for (int lz = bz; lz < bz + 4; lz++) {
+                            int id = section.getBlockId(lx, ly, lz);
+                            int slot;
+                            if (id == lastId) {
+                                slot = lastSlot;
+                            } else {
+                                Integer known = idSlot.get(id);
+                                if (known == null) {
+                                    known = 0;
+                                    WrappedBlockState st = section.get(lx, ly, lz);
+                                    StateType type = st != null ? st.getType() : null;
+                                    if (type != null && TERRAIN_TYPES.contains(type)
+                                            && (xray == null || !xray.isAnyHiddenOre(id))
+                                            && states.size() < 127) {
+                                        states.add(st);
+                                        known = states.size();
+                                    }
+                                    idSlot.put(id, known);
+                                }
+                                slot = known;
+                                lastId = id;
+                                lastSlot = slot;
+                            }
+                            if (slot == 0) continue;
+                            int j = 0;
+                            while (j < distinct && ids[j] != slot) j++;
+                            if (j == distinct) {
+                                if (distinct == ids.length) continue; // rare: > 8 rock types in one cell
+                                ids[distinct] = slot; counts[distinct] = 0; distinct++;
+                            }
+                            counts[j]++;
+                        }
+                    }
+                }
+                int best = -1;
+                for (int j = 0; j < distinct; j++) {
+                    if (best < 0 || counts[j] > counts[best] || (counts[j] == counts[best] && ids[j] < ids[best])) best = j;
+                }
+                if (best >= 0) {
+                    slotOf[si * 64 + c] = (byte) ids[best];
+                    countOf[si * 64 + c] = counts[best];
+                }
+            }
+        }
+        if (states.isEmpty()) return;
+
+        // Air cells: take the rock of the cells around them, one cell further
+        // per round. Each round only reads the previous one, so the result
+        // doesn't depend on loop order.
+        for (int round = 0; round < 8; round++) {
+            byte[] nextSlot = slotOf.clone();
+            int[] nextCount = countOf.clone();
+            boolean changed = false;
+            for (int i = 0; i < cellsTotal; i++) {
+                if (slotOf[i] != 0) continue;
+                int si = i >> 6, c = i & 63;
+                int sx = c & 3, sy = ((c >> 2) & 3) + si * 4, sz = (c >> 4) & 3;
+                int distinct = 0;
+                for (int dx = -1; dx <= 1; dx++) {
+                    int nx = sx + dx;
+                    if (nx < 0 || nx > 3) continue;
+                    for (int dy = -1; dy <= 1; dy++) {
+                        int ny = sy + dy;
+                        if (ny < 0 || ny >= (lastSection + 1) * 4) continue;
+                        for (int dz = -1; dz <= 1; dz++) {
+                            int nz = sz + dz;
+                            if (nz < 0 || nz > 3 || (dx | dy | dz) == 0) continue;
+                            int n = (ny >> 2) * 64 + (nx | (ny & 3) << 2 | nz << 4);
+                            int slot = slotOf[n];
+                            if (slot == 0) continue;
+                            int j = 0;
+                            while (j < distinct && ids[j] != slot) j++;
+                            if (j == distinct) {
+                                if (distinct == ids.length) continue;
+                                ids[distinct] = slot; counts[distinct] = 0; distinct++;
+                            }
+                            counts[j] += countOf[n];
+                        }
+                    }
+                }
+                int best = -1;
+                for (int j = 0; j < distinct; j++) {
+                    if (best < 0 || counts[j] > counts[best] || (counts[j] == counts[best] && ids[j] < ids[best])) best = j;
+                }
+                if (best >= 0) {
+                    nextSlot[i] = (byte) ids[best];
+                    nextCount[i] = 1; // borrowed: weighs less than real rock
+                    changed = true;
+                }
+            }
+            slotOf = nextSlot;
+            countOf = nextCount;
+            if (!changed) break;
+        }
+        palette.cellStates = states.toArray(new WrappedBlockState[0]);
+        palette.cellIndex = slotOf;
+    }
+
+    // ── Follow-terrain cover ─────────────────────────────────────────────
+
+    private static void setCover(ColumnPalette p, short[] raw, short[] top, int maxCover, int guessed) {
+        p.coverRaw = raw;
+        if (top == null) return;
+        p.guessedNeighbours = guessed;
+        p.coverTop = top;
+        p.maxCover = maxCover;
+        p.revealTop = top; // merged with an older palette's in keepReveal
+        p.maxReveal = maxCover;
+    }
+
+    /**
+     * NEW (follow-terrain): per column, the highest Y with at least minCover
+     * natural blocks above it (counted down from the roof, gaps allowed).
+     * Never below ceilingY. Columns whose roof is at or below ceiling-y are
+     * skipped, so flat land costs nothing. Usually stops after a few blocks.
+     */
+    private static short[] scanCover(BaseChunk[] sections, int minY, int[] topSolidY,
+                                     int ceilingY, int minCover) {
+        short[] out = new short[256];
+        Map<Integer, Boolean> natural = new HashMap<>();
+        for (int lz = 0; lz < 16; lz++) {
+            for (int lx = 0; lx < 16; lx++) {
+                int col = (lz << 4) | lx;
+                int cover = ceilingY;
+                int roof = topSolidY[col];
+                if (roof > ceilingY) {
+                    int count = 0, lastId = Integer.MIN_VALUE;
+                    boolean lastNatural = false;
+                    for (int y = roof; y > ceilingY; y--) {
+                        int si = (y - minY) >> 4;
+                        if (si < 0 || si >= sections.length) continue;
+                        BaseChunk section = sections[si];
+                        if (section == null || section.isEmpty()) {
+                            y = minY + (si << 4); // whole section is air: skip to its bottom
+                            continue;
+                        }
+                        int ly = (y - minY) & 15;
+                        int id = section.getBlockId(lx, ly, lz);
+                        boolean isNatural;
+                        if (id == lastId) {
+                            isNatural = lastNatural;
+                        } else {
+                            Boolean known = natural.get(id);
+                            if (known == null) {
+                                WrappedBlockState st = section.get(lx, ly, lz);
+                                known = st != null && NATURAL_COVER_TYPES.contains(st.getType());
+                                natural.put(id, known);
+                            }
+                            isNatural = known;
+                            lastId = id;
+                            lastNatural = isNatural;
+                        }
+                        if (isNatural && ++count >= minCover) {
+                            cover = y - 1;
+                            break;
+                        }
+                    }
+                }
+                out[col] = (short) Math.max(ceilingY, cover);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Edge margin: each column gets the lowest cover within EDGE_MARGIN
+     * columns (square), so the first blocks in from a cliff face, overhang
+     * edge or cave mouth stay real. Neighbour chunks use their cached raw
+     * cover; one that isn't cached yet counts as uncovered (bit set in
+     * guessedOut) and this chunk is rebuilt once it is.
+     */
+    private short[] applyEdgeMargin(String worldName, int chunkX, int chunkZ, short[] raw, int ceilingY,
+                                    int[] guessedOut) {
+        final int M = EDGE_MARGIN, W = 16 + 2 * M;
+        ConcurrentHashMap<Long, ColumnPalette> cache = worldCaches.get(worldName);
+        short[][] nb = new short[9][];
+        boolean[] known = new boolean[9];
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                int i = (dx + 1) * 3 + (dz + 1);
+                if (dx == 0 && dz == 0) { nb[i] = raw; known[i] = true; continue; }
+                ColumnPalette p = cache != null ? cache.get(chunkColumnKey(chunkX + dx, chunkZ + dz)) : null;
+                if (p != null) { nb[i] = p.coverRaw; known[i] = true; }
+                else guessedOut[0] |= 1 << i;
+            }
+        }
+        int[] grid = new int[W * W];
+        for (int gx = 0; gx < W; gx++) {
+            int wx = gx - M;
+            int dcx = wx < 0 ? -1 : (wx > 15 ? 1 : 0);
+            for (int gz = 0; gz < W; gz++) {
+                int wz = gz - M;
+                int dcz = wz < 0 ? -1 : (wz > 15 ? 1 : 0);
+                int i = (dcx + 1) * 3 + (dcz + 1);
+                int v;
+                if (!known[i]) {
+                    // BUGFIX: an uncached neighbour used to count as "no cover",
+                    // so on join / teleport (chunks arrive in a spiral) the 3
+                    // outer columns facing unloaded chunks stayed real: strips
+                    // of open cave in every mountain chunk, never re-sent. Now
+                    // the nearest own column is used. Too much hidden is fixed
+                    // by the reveal as soon as someone can see it; too little
+                    // never was.
+                    v = raw[((Math.max(0, Math.min(15, wz))) << 4) | Math.max(0, Math.min(15, wx))];
+                } else if (nb[i] == null) {
+                    v = ceilingY; // no cover there: keep this edge real
+                } else {
+                    v = nb[i][((wz & 15) << 4) | (wx & 15)];
+                }
+                grid[gx * W + gz] = v;
+            }
+        }
+        // Separable min filter: along x, then along z.
+        int[] rowMin = new int[16 * W];
+        for (int lx = 0; lx < 16; lx++) {
+            for (int gz = 0; gz < W; gz++) {
+                int m = Integer.MAX_VALUE;
+                for (int k = 0; k <= 2 * M; k++) m = Math.min(m, grid[(lx + k) * W + gz]);
+                rowMin[lx * W + gz] = m;
+            }
+        }
+        short[] out = new short[256];
+        for (int lx = 0; lx < 16; lx++) {
+            for (int lz = 0; lz < 16; lz++) {
+                int m = Integer.MAX_VALUE;
+                for (int k = 0; k <= 2 * M; k++) m = Math.min(m, rowMin[lx * W + lz + k]);
+                out[(lz << 4) | lx] = (short) Math.max(ceilingY, Math.min(m, raw[(lz << 4) | lx]));
+            }
+        }
+        return out;
     }
 
     private static WeightedPalette toWeightedPalette(Map<Integer, Integer> freq,

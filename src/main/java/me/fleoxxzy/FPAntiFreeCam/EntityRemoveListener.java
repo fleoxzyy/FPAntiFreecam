@@ -17,9 +17,11 @@ import org.bukkit.event.Listener;
 final class EntityRemoveListener implements Listener {
 
     private final ChunkListener chunkListener;
+    private final EntityHider entityHider;
 
-    EntityRemoveListener(ChunkListener chunkListener) {
+    EntityRemoveListener(ChunkListener chunkListener, EntityHider entityHider) {
         this.chunkListener = chunkListener;
+        this.entityHider = entityHider;
     }
 
     static boolean isSupported() {
@@ -34,5 +36,9 @@ final class EntityRemoveListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onEntityRemove(EntityRemoveFromWorldEvent event) {
         chunkListener.removeEntityFromCache(event.getEntity().getEntityId());
+        // NEW: drop per-viewer line-of-sight state for this entity.
+        if (entityHider != null) {
+            entityHider.onEntityRemoved(event.getEntity().getEntityId(), event.getEntity().getUniqueId());
+        }
     }
 }

@@ -53,9 +53,9 @@ permissions:
     default: op
   fpantifreecam.bypass:
     description: >
-      Exempt from both FreeCam protection and Anti-Xray. Either part can be
-      turned back on by explicitly setting fpantifreecam.bypass.freecam or
-      fpantifreecam.bypass.xray to false. Useful for staff/builders.
+      Exempt from FreeCam protection, Anti-Xray and entity hiding. Each part
+      can be turned back on by explicitly setting fpantifreecam.bypass.freecam,
+      .bypass.xray or .bypass.entities to false. Useful for staff/builders.
     default: false
   fpantifreecam.bypass.freecam:
     description: >
@@ -66,6 +66,11 @@ permissions:
     description: >
       Exempt from Anti-Xray only (real ores are always sent). When explicitly
       set, overrides fpantifreecam.bypass for Anti-Xray.
+    default: false
+  fpantifreecam.bypass.entities:
+    description: >
+      Exempt from line-of-sight entity hiding only (sees every entity and
+      player). When explicitly set, overrides fpantifreecam.bypass for entities.
     default: false
   fpantifreecam.alerts:
     description: >

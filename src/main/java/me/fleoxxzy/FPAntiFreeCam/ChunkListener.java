@@ -12,8 +12,24 @@ import com.github.retrooper.packetevents.protocol.world.states.WrappedBlockState
 import com.github.retrooper.packetevents.protocol.world.states.type.StateType;
 import com.github.retrooper.packetevents.protocol.world.states.type.StateTypes;
 import com.github.retrooper.packetevents.util.Vector3i;
+import com.github.retrooper.packetevents.protocol.entity.type.EntityType;
 import com.github.retrooper.packetevents.protocol.entity.type.EntityTypes;
+import com.github.retrooper.packetevents.protocol.player.UserProfile;
 import com.github.retrooper.packetevents.util.Vector3d;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityAnimation;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityEffect;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityEquipment;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityHeadLook;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityMetadata;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityRotation;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityStatus;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityVelocity;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerPlayerInfo;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerPlayerInfoRemove;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerRemoveEntityEffect;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSetPassengers;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSpawnPlayer;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerUpdateAttributes;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerBlockAction;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerBlockChange;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerBlockEntityData;
@@ -118,44 +134,20 @@ public final class ChunkListener implements PacketListener {
      */
     private final Map<UUID, Set<Long>> flatMaskedChunks = new ConcurrentHashMap<>();
 
-    /**
-     * Per-player entities whose SPAWN packet was cancelled (entity ID → last
-     * known position).
-     *
-     * BUGFIX (invisible mobs): cancelling a spawn packet only hides the
-     * entity from the client. The server still counts the entity as tracked
-     * and never sends the spawn again on its own. Before this, a mob that
-     * spawned in a hidden spot and then walked into view (or toward the
-     * player) stayed invisible while it attacked them. Movement packets for
-     * these entities are now watched, and the entity is re-sent once its
-     * position should no longer be hidden.
-     */
-    private final Map<UUID, Map<Integer, HiddenSpawn>> hiddenSpawns = new ConcurrentHashMap<>();
-
-    private static final class HiddenSpawn {
-        final UUID entityUuid;
-        volatile double x, y, z;
-        volatile boolean resyncQueued;
-
-        HiddenSpawn(UUID entityUuid, double x, double y, double z) {
-            this.entityUuid = entityUuid;
-            this.x = x; this.y = y; this.z = z;
-        }
-    }
-
     private static final class MaskedChunk {
         /** Bit i = section (minSection + i) contains filled blocks; bit 63 also covers any higher section. */
         final long sections;
         final int  minSection;
-        /** Player block position and look direction when the chunk was masked. */
-        final int  px, py, pz;
-        final double lx, ly, lz;
+        /**
+         * IMPROVEMENT: per section (same index as the bits above), which of its
+         * 64 4×4×4 sub-cells hold filled blocks. Bit = sx | sy << 2 | sz << 4.
+         */
+        final long[] subMasks;
 
-        MaskedChunk(long sections, int minSection, int px, int py, int pz, double lx, double ly, double lz) {
+        MaskedChunk(long sections, int minSection, long[] subMasks) {
             this.sections = sections;
             this.minSection = minSection;
-            this.px = px; this.py = py; this.pz = pz;
-            this.lx = lx; this.ly = ly; this.lz = lz;
+            this.subMasks = subMasks;
         }
 
         boolean has(int sectionY) {
@@ -163,6 +155,33 @@ public final class ChunkListener implements PacketListener {
             if (idx < 0) return false;
             return (sections & (1L << Math.min(idx, 63))) != 0;
         }
+    }
+
+    /**
+     * NEW: packets about one entity that must be dropped while it's hidden at
+     * packet level (players, cancelled spawns). Checked against the hider's
+     * per-viewer blocked set; an empty set costs one map lookup.
+     */
+    private static final Set<PacketType.Play.Server> ENTITY_PACKETS;
+    static {
+        Set<PacketType.Play.Server> s = new HashSet<>();
+        s.add(PacketType.Play.Server.ENTITY_RELATIVE_MOVE);
+        s.add(PacketType.Play.Server.ENTITY_RELATIVE_MOVE_AND_ROTATION);
+        s.add(PacketType.Play.Server.ENTITY_TELEPORT);
+        s.add(PacketType.Play.Server.ENTITY_POSITION_SYNC);
+        s.add(PacketType.Play.Server.ENTITY_ROTATION);
+        s.add(PacketType.Play.Server.ENTITY_HEAD_LOOK);
+        s.add(PacketType.Play.Server.ENTITY_VELOCITY);
+        s.add(PacketType.Play.Server.ENTITY_METADATA);
+        s.add(PacketType.Play.Server.ENTITY_EQUIPMENT);
+        s.add(PacketType.Play.Server.ENTITY_ANIMATION);
+        s.add(PacketType.Play.Server.ENTITY_STATUS);
+        s.add(PacketType.Play.Server.ENTITY_EFFECT);
+        s.add(PacketType.Play.Server.REMOVE_ENTITY_EFFECT);
+        s.add(PacketType.Play.Server.UPDATE_ATTRIBUTES);
+        s.add(PacketType.Play.Server.SET_PASSENGERS);
+        s.add(PacketType.Play.Server.ENTITY_SOUND_EFFECT);
+        ENTITY_PACKETS = s;
     }
 
     /**
@@ -196,6 +215,11 @@ public final class ChunkListener implements PacketListener {
         s.add(PacketType.Play.Server.ENTITY_TELEPORT);
         s.add(PacketType.Play.Server.ENTITY_POSITION_SYNC);
         s.add(PacketType.Play.Server.DESTROY_ENTITIES);
+        // NEW: line-of-sight EntityHider.
+        s.add(PacketType.Play.Server.SPAWN_PLAYER);
+        s.add(PacketType.Play.Server.PLAYER_INFO);
+        s.add(PacketType.Play.Server.PLAYER_INFO_REMOVE);
+        s.addAll(ENTITY_PACKETS);
         HANDLED_TYPES = s;
     }
 
@@ -269,6 +293,17 @@ public final class ChunkListener implements PacketListener {
         UUID uuid = user.getUUID();
         if (uuid == null) return;
 
+        // NEW: line-of-sight EntityHider, Netty side. Runs before every
+        // world/protection gate, because LOS hiding works in every world.
+        EntityHider hider = plugin.getEntityHider();
+        if (ENTITY_PACKETS.contains(type)) {
+            if (hider != null && hider.hasBlocked(uuid)) cancelIfBlockedEntity(event, uuid, type, hider);
+            if (type != PacketType.Play.Server.ENTITY_SOUND_EFFECT || event.isCancelled()) return;
+        }
+        if (type == PacketType.Play.Server.PLAYER_INFO_REMOVE || type == PacketType.Play.Server.PLAYER_INFO) {
+            if (hider != null && hider.hasInfoMarks(uuid)) suppressOwnInfoRemove(event, uuid, type, hider);
+            return;
+        }
         // Client-side chunk lifecycle: keep the masked-chunk record in sync.
         if (type == PacketType.Play.Server.UNLOAD_CHUNK) {
             try {
@@ -283,33 +318,33 @@ public final class ChunkListener implements PacketListener {
         if (type == PacketType.Play.Server.RESPAWN || type == PacketType.Play.Server.JOIN_GAME) {
             maskedChunks.remove(uuid); // client drops every chunk on respawn/world change
             flatMaskedChunks.remove(uuid);
-            hiddenSpawns.remove(uuid); // and every entity
+            if (hider != null) hider.onClientReset(uuid); // and every entity
             AntiXrayEngine xray = plugin.getAntiXrayEngine();
             if (xray != null) xray.cleanupPlayer(uuid); // hidden ores and reveals went with those chunks
             return;
         }
         if (type == PacketType.Play.Server.DESTROY_ENTITIES) {
-            handleDestroyEntities(event, uuid);
-            return;
-        }
-        if (type == PacketType.Play.Server.ENTITY_RELATIVE_MOVE
-                || type == PacketType.Play.Server.ENTITY_RELATIVE_MOVE_AND_ROTATION
-                || type == PacketType.Play.Server.ENTITY_TELEPORT
-                || type == PacketType.Play.Server.ENTITY_POSITION_SYNC) {
-            handleHiddenEntityMove(event, uuid, type);
+            if (hider != null) {
+                try {
+                    hider.onDestroyPacket(uuid, new WrapperPlayServerDestroyEntities(event).getEntityIds());
+                } catch (Exception ignored) {}
+            }
             return;
         }
 
         Player player = Bukkit.getPlayer(uuid);
         if (player == null || !player.isOnline()) return;
 
-        // SPAWN_ENTITY must cache entity Y even for unprotected players/worlds,
-        // because ENTITY_SOUND_EFFECT for the same entity may arrive later
-        // when the player IS protected.
-        boolean isSpawnPacket = type == PacketType.Play.Server.SPAWN_ENTITY
+        // NEW: spawn packets are decided here for every world, before the
+        // freecam gates below: line-of-sight hiding isn't tied to worlds.list.
+        if (type == PacketType.Play.Server.SPAWN_ENTITY
                 || type == PacketType.Play.Server.SPAWN_LIVING_ENTITY
                 || type == PacketType.Play.Server.SPAWN_EXPERIENCE_ORB
-                || type == PacketType.Play.Server.SPAWN_PAINTING;
+                || type == PacketType.Play.Server.SPAWN_PAINTING
+                || type == PacketType.Play.Server.SPAWN_PLAYER) {
+            handleEntitySpawn(event, player, type, hider);
+            return;
+        }
 
         World world = player.getWorld();
         // NEW: Anti-Xray has its own per-world config, so it has to run for
@@ -321,9 +356,15 @@ public final class ChunkListener implements PacketListener {
         AntiXrayEngine xray = plugin.getAntiXrayEngine();
         boolean xrayActive = blockPacket && xray != null && xray.isActiveFor(player);
 
+        // BUGFIX: a block Anti-Xray sends as a fake block (shulker box, chest
+        // in hidden-blocks) must not get its block entity data or lid
+        // animation either, in any world where Anti-Xray runs.
+        if ((type == PacketType.Play.Server.BLOCK_ENTITY_DATA || type == PacketType.Play.Server.BLOCK_ACTION)
+                && xray != null && xray.isActiveFor(player) && cancelIfXrayMasked(event, player, type, xray)) {
+            return;
+        }
+
         if (world == null || !plugin.isWorldProtected(world.getName())) {
-            // Still cache entity Y for spawn packets in protected worlds
-            if (isSpawnPacket) cacheEntitySpawnY(event);
             if (xrayActive) handleBlockPacket(event, player, type, false);
             return;
         }
@@ -331,8 +372,6 @@ public final class ChunkListener implements PacketListener {
         if (!plugin.isProtectionActive(player) && !plugin.isSmartFillActiveFor(player)) {
             // This chunk goes out unmasked, so it replaces any masked copy.
             if (type == PacketType.Play.Server.CHUNK_DATA) forgetFlatMaskedFromPacket(event, uuid);
-            // Still cache entity Y even when nothing needs hiding right now
-            if (isSpawnPacket) cacheEntitySpawnY(event);
             if (xrayActive) handleBlockPacket(event, player, type, false);
             return;
         }
@@ -360,8 +399,6 @@ public final class ChunkListener implements PacketListener {
             handleEntitySoundEffect(event, player);
         } else if (type == PacketType.Play.Server.PARTICLE) {
             handleParticle(event, player);
-        } else if (isSpawnPacket) {
-            handleEntitySpawn(event, player);
         }
     }
 
@@ -400,6 +437,7 @@ public final class ChunkListener implements PacketListener {
                 BaseChunk[] sections = column != null ? column.getChunks() : null;
                 if (sections == null) return;
                 if (xray.processChunk(player, sections, column.getX(), column.getZ())) {
+                    stripXrayTileEntities(column, player, xray);
                     event.markForReEncode(true);
                 }
             } else if (type == PacketType.Play.Server.BLOCK_CHANGE) {
@@ -539,7 +577,7 @@ public final class ChunkListener implements PacketListener {
             }
 
             if (plugin.isPieChartProtectionEnabled() && column != null) {
-                if (stripTileEntitiesBelow(column, hardFloorY, false, null, null)) modified = true;
+                if (stripTileEntitiesBelow(column, hardFloorY, false, null, null, null, hardFloorY)) modified = true;
             }
 
             if (modified) {
@@ -561,7 +599,10 @@ public final class ChunkListener implements PacketListener {
         if (!smartFillActive) return; // nothing to hide for this player right now
 
         int ceilingY = Math.max(hardFloorY, plugin.getSmartFillCeilingY());
-        if (minY > ceilingY) return;
+        // NEW (follow-terrain): columns under a hill or mountain mask up to
+        // their natural cover, above ceiling-y. Worked out with the palette.
+        boolean followTerrain = plugin.isFollowTerrainWorld(player.getWorld());
+        if (minY > ceilingY && !followTerrain) return;
 
         SmartFillEngine.ColumnPalette palette = null;
         int chunkX = 0, chunkZ = 0;
@@ -569,10 +610,13 @@ public final class ChunkListener implements PacketListener {
             chunkX = column.getX();
             chunkZ = column.getZ();
             palette = smartFill.getOrBuildPalette(worldName, chunkX, chunkZ,
-                    sections, minY, ceilingY);
+                    sections, minY, ceilingY, followTerrain);
         } catch (Exception e) {
             plugin.dbg("SmartFill palette error: " + e.getMessage());
         }
+        final int chunkTop = SmartFillEngine.chunkMaskTop(palette, ceilingY);
+        final short[] cover = palette != null ? palette.coverTop : null;
+        if (minY > chunkTop) return;
 
         SmartFillReveal reveal = plugin.getSmartFillReveal();
         org.bukkit.Location pLoc = player.getLocation();
@@ -584,24 +628,26 @@ public final class ChunkListener implements PacketListener {
         boolean modified      = false;
         long    replacedCount = 0;
         long    maskedBits    = 0;
+        long[]  subMasks      = new long[Math.min(sections.length, 64)];
 
         for (int si = 0; si < sections.length; si++) {
             BaseChunk section = sections[si];
             if (section == null) continue;
 
             int sectionBaseY = minY + si * 16;
-            if (sectionBaseY > ceilingY) continue;
+            if (sectionBaseY > chunkTop) continue;
             long replacedBefore = replacedCount;
 
             for (int ly = 0; ly < 16; ly++) {
                 int worldY = sectionBaseY + ly;
-                if (worldY > ceilingY) break;
+                if (worldY > chunkTop) break;
 
                 for (int lx = 0; lx < 16; lx++) {
                     int worldX = (chunkX << 4) | lx;
 
                     for (int lz = 0; lz < 16; lz++) {
                     int worldZ = (chunkZ << 4) | lz;
+                    if (worldY > ceilingY && (cover == null || worldY > cover[(lz << 4) | lx])) continue;
                 try {
                                 WrappedBlockState current = section.get(lx, ly, lz);
 
@@ -657,6 +703,7 @@ public final class ChunkListener implements PacketListener {
                             section.set(lx, ly, lz, hardFloorFill);
                                         replacedCount++;
                             modified = true;
+                            subMasks[Math.min(si, 63)] |= 1L << ((lx >> 2) | (ly >> 2) << 2 | (lz >> 2) << 4);
                         }
                 continue;
                 }
@@ -687,6 +734,7 @@ public final class ChunkListener implements PacketListener {
                             section.set(lx, ly, lz, fill);
                             replacedCount++;
                             modified = true;
+                            subMasks[Math.min(si, 63)] |= 1L << ((lx >> 2) | (ly >> 2) << 2 | (lz >> 2) << 4);
                         } catch (Exception ignored) {}
                     }
                 }
@@ -695,11 +743,12 @@ public final class ChunkListener implements PacketListener {
         }
 
         if (plugin.isPieChartProtectionEnabled() && column != null) {
-            boolean tileModified = stripTileEntitiesBelow(column, ceilingY, true, reveal, playerId);
+            boolean tileModified = stripTileEntitiesBelow(column, chunkTop, true, reveal, playerId,
+                    cover, ceilingY);
             if (tileModified) modified = true;
         }
 
-        recordMaskedChunk(playerId, chunkX, chunkZ, maskedBits, minY >> 4, pBX, pBY, pBZ);
+        recordMaskedChunk(playerId, chunkX, chunkZ, maskedBits, minY >> 4, subMasks);
 
         if (modified) {
             try { wrapper.setIgnoreOldData(true); } catch (Exception ignored) {}
@@ -717,7 +766,8 @@ public final class ChunkListener implements PacketListener {
      * In flat mode, strips all tile entities at or below voidY.
      */
     private boolean stripTileEntitiesBelow(Column column, int maxY, boolean useSmartFill,
-                                           SmartFillReveal reveal, UUID playerId) {
+                                           SmartFillReveal reveal, UUID playerId,
+                                           short[] cover, int ceilingY) {
         try {
             TileEntity[] tileEntities = column.getTileEntities();
             if (tileEntities == null || tileEntities.length == 0) return false;
@@ -728,7 +778,10 @@ public final class ChunkListener implements PacketListener {
             for (TileEntity te : tileEntities) {
                 if (te == null) continue;
                 int teY = te.getY();
-                if (teY <= maxY) {
+                // Follow-terrain: above ceiling-y only where that column is covered.
+                boolean inZone = teY <= maxY && (teY <= ceilingY || cover == null
+                        || teY <= cover[((te.getZ() & 15) << 4) | (te.getX() & 15)]);
+                if (inZone) {
                     if (useSmartFill && reveal != null) {
                         if (!reveal.isPositionRevealed(playerId, te.getX(), teY, te.getZ())) {
                             changed = true;
@@ -797,20 +850,33 @@ public final class ChunkListener implements PacketListener {
 
             if (!plugin.isSmartFillActiveFor(player)) return;
             int ceilingY = Math.max(hardFloorY, plugin.getSmartFillCeilingY());
+            int lx = pos.getX() & 15, lz = pos.getZ() & 15;
+            SmartFillEngine.ColumnPalette palette =
+                    smartFill.getCachedPalette(worldName, pos.getX() >> 4, pos.getZ() >> 4);
+            // NEW (follow-terrain): this column's masking / reveal tops.
+            int maskTop = SmartFillEngine.maskTop(palette, lx, lz, ceilingY);
+            int revealTop = SmartFillEngine.revealTop(palette, lx, lz, ceilingY);
+
+            // NEW: a block turning into air may join this player's cave to
+            // another one, whatever caused it (WorldEdit, plugins, fluids).
+            SmartFillReveal airReveal = plugin.getSmartFillReveal();
+            if (airReveal != null && pos.getY() <= revealTop + 2 && wrapper.getBlockState().getType().isAir()) {
+                airReveal.onAirSent(player.getUniqueId(), player.getWorld().getUID(),
+                        pos.getX(), pos.getY(), pos.getZ());
+            }
 
             // Invalidate palette cache if block changes near/above the boundary,
             // so a real terrain edit near the surface eventually shows up in
             // future fills instead of the palette going stale forever.
-            int sampleCeiling = ceilingY + (plugin.getSmartFillSampleRadius() + 1) * 16;
-            if (pos.getY() > hardFloorY && pos.getY() <= sampleCeiling) {
+            int sampleCeiling = SmartFillEngine.chunkMaskTop(palette, ceilingY)
+                    + (plugin.getSmartFillSampleRadius() + 1) * 16;
+            if (pos.getY() > hardFloorY && (pos.getY() <= sampleCeiling
+                    || (plugin.isFollowTerrainWorld(player.getWorld())
+                        && SmartFillEngine.coverMayChange(palette, lx, lz, pos.getY(), ceilingY)))) {
                 smartFill.invalidate(worldName, pos.getX() >> 4, pos.getZ() >> 4);
             }
 
-            if (pos.getY() > ceilingY) return;
-
-            SmartFillEngine.ColumnPalette palette =
-                    smartFill.getCachedPalette(worldName, pos.getX() >> 4, pos.getZ() >> 4);
-
+            if (pos.getY() > maskTop) return;
             // IMPROVEMENT: shallow surface structures (PvP arenas, crystal
             // holes, player-built rooms) are exempted entirely - see the
             // matching comment in handleChunkData.
@@ -929,9 +995,33 @@ public final class ChunkListener implements PacketListener {
             int pBY = pLoc.getBlockY();
             int pBZ = pLoc.getBlockZ();
             UUID playerId = player.getUniqueId();
+            // NEW (follow-terrain): per-column masking tops in this chunk.
+            final int chunkTop = SmartFillEngine.chunkMaskTop(palette, ceilingY);
+            final int revealChunkTop = Math.max(chunkTop,
+                    palette != null && palette.revealTop != null ? palette.maxReveal : ceilingY);
+            boolean coverEdit = false;
+
+            // NEW: same as BLOCK_CHANGE: air arriving from any cause re-runs
+            // the fill. One air block per packet is enough.
+            if (reveal != null) {
+                UUID worldId = player.getWorld().getUID();
+                for (WrapperPlayServerMultiBlockChange.EncodedBlock block : blocks) {
+                    if (block == null || block.getY() > revealChunkTop + 2) continue;
+                    int id = block.getBlockId();
+                    if (id != 0 && !WrappedBlockState.getByGlobalId(id, false).getType().isAir()) continue;
+                    reveal.onAirSent(playerId, worldId, block.getX(), block.getY(), block.getZ());
+                    break;
+                }
+            }
 
             for (WrapperPlayServerMultiBlockChange.EncodedBlock block : blocks) {
-                if (block == null || block.getY() > ceilingY) continue;
+                if (block == null) continue;
+                if (palette != null && palette.coverTop != null && !coverEdit
+                        && SmartFillEngine.coverMayChange(palette, block.getX() & 15, block.getZ() & 15,
+                                block.getY(), ceilingY)) {
+                    coverEdit = true;
+                }
+                if (block.getY() > SmartFillEngine.maskTop(palette, block.getX() & 15, block.getZ() & 15, ceilingY)) continue;
 
                 // IMPROVEMENT: shallow surface structures (PvP arenas,
                 // crystal holes, player-built rooms) are exempted entirely -
@@ -980,6 +1070,14 @@ public final class ChunkListener implements PacketListener {
                 modified = true;
             }
 
+            // Follow-terrain: a mountain roof dug out (or built) by this edit
+            // changes the column's cover; rebuild on the next chunk send.
+            if (coverEdit && plugin.isFollowTerrainWorld(player.getWorld())) {
+                for (WrapperPlayServerMultiBlockChange.EncodedBlock b : blocks) {
+                    if (b != null) { smartFill.invalidate(worldName, b.getX() >> 4, b.getZ() >> 4); break; }
+                }
+            }
+
             if (modified) {
                 event.markForReEncode(true);
                 plugin.addBlocksReplaced(replacedCount);
@@ -988,6 +1086,41 @@ public final class ChunkListener implements PacketListener {
             }
         } catch (Exception e) {
             plugin.dbg("MULTI_BLOCK_CHANGE error: " + e.getMessage());
+        }
+    }
+
+    private boolean cancelIfXrayMasked(PacketSendEvent event, Player player, PacketType.Play.Server type,
+                                       AntiXrayEngine xray) {
+        try {
+            Vector3i pos = type == PacketType.Play.Server.BLOCK_ENTITY_DATA
+                    ? new WrapperPlayServerBlockEntityData(event).getPosition()
+                    : new WrapperPlayServerBlockAction(event).getBlockPosition();
+            if (pos == null || !xray.isMasked(player, pos.getX(), pos.getY(), pos.getZ())) return false;
+            event.setCancelled(true);
+            plugin.dbg("Anti-Xray " + type + " cancelled at " + pos + " for " + player.getName());
+            return true;
+        } catch (Exception e) {
+            plugin.dbg("Anti-Xray " + type + " error: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** BUGFIX: drops block entities of blocks Anti-Xray just masked in this column. */
+    private boolean stripXrayTileEntities(Column column, Player player, AntiXrayEngine xray) {
+        try {
+            TileEntity[] tes = column.getTileEntities();
+            if (tes == null || tes.length == 0 || TILE_ENTITIES_FIELD == null) return false;
+            List<TileEntity> kept = new ArrayList<>(tes.length);
+            for (TileEntity te : tes) {
+                if (te != null && xray.isMasked(player, te.getX(), te.getY(), te.getZ())) continue;
+                kept.add(te);
+            }
+            if (kept.size() == tes.length) return false;
+            TILE_ENTITIES_FIELD.set(column, kept.toArray(new TileEntity[0]));
+            return true;
+        } catch (Exception e) {
+            plugin.dbg("Anti-Xray tile entity strip error: " + e.getMessage());
+            return false;
         }
     }
 
@@ -1112,62 +1245,159 @@ public final class ChunkListener implements PacketListener {
     }
 
     /**
-     * Cancel entity spawn packets for underground entities before the client
-     * registers them. Prevents F3 pie-chart spikes and ESP from one-tick leaks
-     * before {@link EntityHider} can call hideEntity.
+     * NEW: entity spawn packets, Netty side. Caches the position for later
+     * ENTITY_SOUND_EFFECT, then lets {@link EntityHider} decide: the hidden
+     * zone (void-y / Smart Fill, pie-chart-protection) plus line of sight.
+     * A cancelled spawn is re-sent by the hider's next check.
      */
-    /**
-     * Caches the entity's Y from a spawn packet without doing any protection logic.
-     * Called even for unprotected players/worlds so the cache is populated
-     * before a future ENTITY_SOUND_EFFECT arrives.
-     */
-    private void cacheEntitySpawnY(PacketSendEvent event) {
+    private void handleEntitySpawn(PacketSendEvent event, Player player,
+                                   PacketType.Play.Server type, EntityHider hider) {
+        plugin.incrementPacketsProcessed();
         try {
-            WrapperPlayServerSpawnEntity wrapper = new WrapperPlayServerSpawnEntity(event);
-            if (wrapper.getEntityType() == EntityTypes.PLAYER) return;
-            Vector3d pos = wrapper.getPosition();
+            int entityId;
+            UUID entityUuid;
+            Vector3d pos;
+            boolean isPlayer;
+            String typeKey = null;
+            if (type == PacketType.Play.Server.SPAWN_PLAYER) {
+                // Only 1.19 and 1.20.1 and older; newer versions use SPAWN_ENTITY.
+                WrapperPlayServerSpawnPlayer w = new WrapperPlayServerSpawnPlayer(event);
+                entityId = w.getEntityId();
+                entityUuid = w.getUUID();
+                pos = w.getPosition();
+                isPlayer = true;
+            } else {
+                WrapperPlayServerSpawnEntity w = new WrapperPlayServerSpawnEntity(event);
+                EntityType et = w.getEntityType();
+                isPlayer = et == EntityTypes.PLAYER;
+                entityId = w.getEntityId();
+                entityUuid = w.getUUID().orElse(null);
+                pos = w.getPosition();
+                if (et != null) {
+                    try {
+                        typeKey = et.getName().getKey();
+                    } catch (Exception ignored) {}
+                }
+            }
             if (pos == null) return;
-            entityYCache.put(wrapper.getEntityId(), blockPos(pos));
+            int[] entityPos = blockPos(pos);
+            // Players aren't in this cache: ENTITY_SOUND_EFFECT for a player
+            // is their own sound and was never cancelled.
+            if (!isPlayer) entityYCache.put(entityId, entityPos);
+            if (hider == null) return;
+
+            UUID viewerId = player.getUniqueId();
+            // Chunk mode relies on this to hide new entities in the zone, so
+            // hide-entities alone also checks it (like the old spawn hider).
+            boolean zoneHidden = (plugin.isPieChartProtectionEnabled() || hider.isEnabled()) && !isPlayer
+                    && isEntityPositionHidden(player, entityPos[0], entityPos[1], entityPos[2]);
+            if (hider.onSpawnPacket(viewerId, entityId, entityUuid, isPlayer, typeKey,
+                    pos.getX(), pos.getY(), pos.getZ(), zoneHidden)) {
+                event.setCancelled(true);
+                plugin.dbg("Spawn cancelled for entity #" + entityId
+                        + (typeKey != null ? " (" + typeKey + ")" : isPlayer ? " (player)" : "")
+                        + " at Y=" + entityPos[1] + " for " + player.getName()
+                        + (zoneHidden ? " [zone]" : " [sight]"));
+            }
+        } catch (Exception e) {
+            plugin.dbg("SPAWN packet error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * NEW: packets about an entity the client doesn't have (or must not see)
+     * are dropped, so nothing re-adds it client-side and no ESP mod picks it
+     * up from a movement or metadata packet.
+     */
+    private void cancelIfBlockedEntity(PacketSendEvent event, UUID viewer,
+                                       PacketType.Play.Server type, EntityHider hider) {
+        try {
+            int id;
+            if (type == PacketType.Play.Server.ENTITY_RELATIVE_MOVE) {
+                id = new WrapperPlayServerEntityRelativeMove(event).getEntityId();
+            } else if (type == PacketType.Play.Server.ENTITY_RELATIVE_MOVE_AND_ROTATION) {
+                id = new WrapperPlayServerEntityRelativeMoveAndRotation(event).getEntityId();
+            } else if (type == PacketType.Play.Server.ENTITY_TELEPORT) {
+                id = new WrapperPlayServerEntityTeleport(event).getEntityId();
+            } else if (type == PacketType.Play.Server.ENTITY_POSITION_SYNC) {
+                id = new WrapperPlayServerEntityPositionSync(event).getId();
+            } else if (type == PacketType.Play.Server.ENTITY_ROTATION) {
+                id = new WrapperPlayServerEntityRotation(event).getEntityId();
+            } else if (type == PacketType.Play.Server.ENTITY_HEAD_LOOK) {
+                id = new WrapperPlayServerEntityHeadLook(event).getEntityId();
+            } else if (type == PacketType.Play.Server.ENTITY_VELOCITY) {
+                id = new WrapperPlayServerEntityVelocity(event).getEntityId();
+            } else if (type == PacketType.Play.Server.ENTITY_METADATA) {
+                id = new WrapperPlayServerEntityMetadata(event).getEntityId();
+            } else if (type == PacketType.Play.Server.ENTITY_EQUIPMENT) {
+                id = new WrapperPlayServerEntityEquipment(event).getEntityId();
+            } else if (type == PacketType.Play.Server.ENTITY_ANIMATION) {
+                id = new WrapperPlayServerEntityAnimation(event).getEntityId();
+            } else if (type == PacketType.Play.Server.ENTITY_STATUS) {
+                id = new WrapperPlayServerEntityStatus(event).getEntityId();
+            } else if (type == PacketType.Play.Server.ENTITY_EFFECT) {
+                id = new WrapperPlayServerEntityEffect(event).getEntityId();
+            } else if (type == PacketType.Play.Server.REMOVE_ENTITY_EFFECT) {
+                id = new WrapperPlayServerRemoveEntityEffect(event).getEntityId();
+            } else if (type == PacketType.Play.Server.UPDATE_ATTRIBUTES) {
+                id = new WrapperPlayServerUpdateAttributes(event).getEntityId();
+            } else if (type == PacketType.Play.Server.SET_PASSENGERS) {
+                id = new WrapperPlayServerSetPassengers(event).getEntityId();
+            } else if (type == PacketType.Play.Server.ENTITY_SOUND_EFFECT) {
+                id = new WrapperPlayServerEntitySoundEffect(event).getEntityId();
+            } else {
+                return;
+            }
+            if (hider.isBlocked(viewer, id)) event.setCancelled(true);
         } catch (Exception ignored) {}
     }
 
-    private void handleEntitySpawn(PacketSendEvent event, Player player) {
-        plugin.incrementPacketsProcessed();
+    /**
+     * NEW: our own hide+show re-sync of a hidden player makes the server send
+     * a tab-list remove followed by an add. Dropping the remove keeps the tab
+     * list exactly as it was (the add is a no-op for an entry that's still
+     * there). PLAYER_INFO_REMOVE is 1.19.3+; older versions use PLAYER_INFO
+     * with the REMOVE_PLAYER action.
+     */
+    private void suppressOwnInfoRemove(PacketSendEvent event, UUID viewer,
+                                       PacketType.Play.Server type, EntityHider hider) {
         try {
-            WrapperPlayServerSpawnEntity wrapper = new WrapperPlayServerSpawnEntity(event);
-            if (wrapper.getEntityType() == EntityTypes.PLAYER) return;
-
-            Vector3d pos = wrapper.getPosition();
-            if (pos == null) return;
-
-            int[] entityPos = blockPos(pos);
-            int entityY = entityPos[1];
-
-            // Cache the entity's position for later use by handleEntitySoundEffect.
-            // This runs on the Netty thread where we already have the position
-            // from the packet, so no Bukkit API calls are needed.
-            entityYCache.put(wrapper.getEntityId(), entityPos);
-
-            // BUGFIX: this cancellation was previously unconditional, ignoring
-            // protection.pie-chart-protection entirely (same issue as the tile-entity
-            // stripping above). Only cancel spawn packets when the setting is enabled.
-            if (!plugin.isPieChartProtectionEnabled()) return;
-
-            if (cancelIfHiddenHardFloor(event, player, entityPos[0], entityY, entityPos[2])) {
-                // Remember the cancelled spawn: the server still thinks the
-                // client tracks this entity and will never re-send the spawn
-                // on its own, so it has to be re-synced once it should be
-                // visible again (see handleHiddenEntityMove / recheckHiddenSpawns).
-                UUID entityUuid = wrapper.getUUID().orElse(null);
-                if (entityUuid != null) {
-                    hiddenSpawns.computeIfAbsent(player.getUniqueId(), k -> new ConcurrentHashMap<>())
-                            .put(wrapper.getEntityId(), new HiddenSpawn(entityUuid, pos.getX(), pos.getY(), pos.getZ()));
+            if (type == PacketType.Play.Server.PLAYER_INFO_REMOVE) {
+                WrapperPlayServerPlayerInfoRemove w = new WrapperPlayServerPlayerInfoRemove(event);
+                List<UUID> ids = w.getProfileIds();
+                if (ids == null || ids.isEmpty()) return;
+                List<UUID> keep = new ArrayList<>(ids.size());
+                for (UUID id : ids) {
+                    if (!hider.consumeInfoRemove(viewer, id)) keep.add(id);
                 }
-                plugin.dbg("SPAWN_ENTITY cancelled " + wrapper.getEntityType().getName()
-                        + " at Y=" + entityY + " for " + player.getName());
+                if (keep.size() == ids.size()) return;
+                if (keep.isEmpty()) {
+                    event.setCancelled(true);
+                } else {
+                    w.setProfileIds(keep); // other removes in the same packet still apply
+                    event.markForReEncode(true);
+                }
+                return;
+            }
+            WrapperPlayServerPlayerInfo w = new WrapperPlayServerPlayerInfo(event);
+            if (w.getAction() != WrapperPlayServerPlayerInfo.Action.REMOVE_PLAYER) return;
+            List<WrapperPlayServerPlayerInfo.PlayerData> data = w.getPlayerDataList();
+            if (data == null || data.isEmpty()) return;
+            List<WrapperPlayServerPlayerInfo.PlayerData> keep = new ArrayList<>(data.size());
+            for (WrapperPlayServerPlayerInfo.PlayerData d : data) {
+                UserProfile p = d.getUserProfile();
+                UUID id = p != null ? p.getUUID() : null;
+                if (id == null || !hider.consumeInfoRemove(viewer, id)) keep.add(d);
+            }
+            if (keep.size() == data.size()) return;
+            if (keep.isEmpty()) {
+                event.setCancelled(true);
+            } else {
+                w.setPlayerDataList(keep);
+                event.markForReEncode(true);
             }
         } catch (Exception e) {
-            plugin.dbg("SPAWN_ENTITY error: " + e.getMessage());
+            plugin.dbg("PLAYER_INFO suppression error: " + e.getMessage());
         }
     }
 
@@ -1233,7 +1463,12 @@ public final class ChunkListener implements PacketListener {
         if (!plugin.isSmartFillActiveFor(player)) return false;
 
         int ceilingY = plugin.getSmartFillCeilingY();
-        if (y > ceilingY) return false;
+        if (y > ceilingY) {
+            // NEW (follow-terrain): above ceiling-y only inside covered columns.
+            if (x == null || z == null) return false;
+            SmartFillEngine.ColumnPalette p = smartFill.getCachedPalette(player.getWorld().getName(), x >> 4, z >> 4);
+            if (y > SmartFillEngine.maskTop(p, x & 15, z & 15, ceilingY)) return false;
+        }
 
         if (x == null || z == null) return false; // no position to localize, don't guess
 
@@ -1287,19 +1522,15 @@ public final class ChunkListener implements PacketListener {
 
     // ── Masked-chunk tracking (used to skip no-op chunk refreshes) ─────────
 
-    private void recordMaskedChunk(UUID playerId, int cx, int cz, long bits, int minSection,
-                                   int px, int py, int pz) {
+    private void recordMaskedChunk(UUID playerId, int cx, int cz, long bits, int minSection, long[] subMasks) {
         long key = columnKey(cx, cz);
         if (bits == 0) {
             Map<Long, MaskedChunk> m = maskedChunks.get(playerId);
             if (m != null) m.remove(key);
             return;
         }
-        SmartFillReveal reveal = plugin.getSmartFillReveal();
-        org.bukkit.util.Vector look = reveal != null ? reveal.getLookVector(playerId) : null;
         maskedChunks.computeIfAbsent(playerId, k -> new ConcurrentHashMap<>())
-                .put(key, new MaskedChunk(bits, minSection, px, py, pz,
-                        look != null ? look.getX() : 0, look != null ? look.getY() : 0, look != null ? look.getZ() : 0));
+                .put(key, new MaskedChunk(bits, minSection, subMasks));
     }
 
     private void forgetChunk(UUID playerId, int cx, int cz) {
@@ -1359,13 +1590,13 @@ public final class ChunkListener implements PacketListener {
     }
 
     /**
-     * Decides whether re-sending this chunk would actually show the player
-     * something new: the client must still have fake blocks in it, one of
-     * those masked sections must now fall inside the reveal sphere, the look
-     * cone or the line of sight, and the player must have moved or turned
-     * since the chunk was last masked (otherwise the re-send would produce
-     * the exact same chunk and just cause a visible reload, especially on
-     * Bedrock where Geyser rebuilds every re-sent chunk from scratch).
+     * IMPROVEMENT: decides whether re-sending this chunk would actually show
+     * the player something new: the client must still have fake blocks in it,
+     * and one of the masked 4×4×4 sub-cells must be fully revealed now (fill,
+     * line of sight, or well inside the sphere where it still applies). The
+     * re-send then can't mask that sub-cell again, so this never loops; a
+     * smaller reveal means fewer re-sends, not more (each one is a visible
+     * reload on Bedrock). Any thread (reads snapshots only).
      */
     public boolean shouldRefreshForReveal(Player player, int cx, int cz) {
         UUID id = player.getUniqueId();
@@ -1379,188 +1610,95 @@ public final class ChunkListener implements PacketListener {
 
         org.bukkit.Location loc = player.getLocation();
         int px = loc.getBlockX(), py = loc.getBlockY(), pz = loc.getBlockZ();
-        org.bukkit.util.Vector look = reveal.getLookVector(id);
-
-        int mdx = px - mc.px, mdy = py - mc.py, mdz = pz - mc.pz;
-        boolean moved = mdx * mdx + mdy * mdy + mdz * mdz >= REVEAL_REFRESH_MOVE_SQ;
-        boolean turned = look != null
-                && look.getX() * mc.lx + look.getY() * mc.ly + look.getZ() * mc.lz < REVEAL_REFRESH_TURN_DOT;
-        if (!moved && !turned) return false;
-
-        int revealRadius = reveal.getRevealRadius();
-        int lookDistance = reveal.getLookDistance();
-        int lookReach = lookDistance + 14;
-        int lookReachSq = lookReach * lookReach;
-
-        int minX = cx << 4, minZ = cz << 4;
-        for (int i = 0; i < 64; i++) {
-            if ((mc.sections & (1L << i)) == 0) continue;
-            int sy = mc.minSection + i;
-            int minY = sy << 4;
-
-            // Reveal sphere: only refresh when the player got meaningfully
-            // closer to a masked section that's now within the sphere, i.e.
-            // the re-send would actually reveal blocks it didn't before.
-            double nowDist  = Math.sqrt(nearestSq(minX, minY, minZ, px, py, pz));
-            if (nowDist <= revealRadius) {
-                double thenDist = Math.sqrt(nearestSq(minX, minY, minZ, mc.px, mc.py, mc.pz));
-                if (thenDist - nowDist >= REVEAL_REFRESH_CLOSER_BLOCKS) return true;
+        long farSq = (long) reveal.getFarOnlyDistance() * reveal.getFarOnlyDistance();
+        for (int i = 0; i < mc.subMasks.length; i++) {
+            long bits = mc.subMasks[i];
+            if (bits == 0) continue;
+            int secY = mc.minSection + i;
+            // IMPROVEMENT: a section this far away can only be revealed by the
+            // far sight sweep, which works per section. One lookup gives the
+            // same answer as checking each of its masked cells.
+            long ndx = axisGap(px, cx << 4), ndy = axisGap(py, secY << 4), ndz = axisGap(pz, cz << 4);
+            if (ndx * ndx + ndy * ndy + ndz * ndz > farSq) {
+                if (reveal.isSectionSightRevealed(id, cx, secY, cz)) return true;
+                continue;
             }
-
-            // Look cone: section is in the cone now but wasn't when masked.
-            if (look != null && inCone(minX + 8 - px, minY + 8 - py, minZ + 8 - pz,
-                    look.getX(), look.getY(), look.getZ(), lookReachSq)
-                    && !inCone(minX + 8 - mc.px, minY + 8 - mc.py, minZ + 8 - mc.pz,
-                    mc.lx, mc.ly, mc.lz, lookReachSq)) {
-                return true;
+            int sy0 = secY << 2;
+            int sx0 = cx << 2, sz0 = cz << 2;
+            while (bits != 0) {
+                int b = Long.numberOfTrailingZeros(bits);
+                bits &= bits - 1;
+                if (reveal.isSubCellRevealed(id, sx0 + (b & 3), sy0 + ((b >> 2) & 3), sz0 + ((b >> 4) & 3),
+                        px, py, pz)) return true;
             }
         }
         return false;
     }
 
-    private static int nearestSq(int minX, int minY, int minZ, int px, int py, int pz) {
-        int nx = Math.max(minX, Math.min(px, minX + 15)) - px;
-        int ny = Math.max(minY, Math.min(py, minY + 15)) - py;
-        int nz = Math.max(minZ, Math.min(pz, minZ + 15)) - pz;
-        return nx * nx + ny * ny + nz * nz;
-    }
-
-    private static boolean inCone(double dx, double dy, double dz,
-                                  double lx, double ly, double lz, int maxDistSq) {
-        double distSq = dx * dx + dy * dy + dz * dz;
-        if (distSq <= 0 || distSq > maxDistSq) return false;
-        double dot = dx * lx + dy * ly + dz * lz;
-        return dot > 0 && (dot * dot) / distSq >= 0.55;
+    /** Distance from p to the 16-block span starting at lo (0 inside). */
+    private static long axisGap(int p, int lo) {
+        if (p < lo) return lo - p;
+        if (p > lo + 15) return p - (lo + 15);
+        return 0;
     }
 
     /** Drops all per-player tracking (call on quit). */
     public void cleanupPlayer(UUID id) {
         maskedChunks.remove(id);
         flatMaskedChunks.remove(id);
-        hiddenSpawns.remove(id);
     }
+
+    /** NEW: Smart Fill palette cache (follow-terrain lookups from the reveal side). */
+    SmartFillEngine getSmartFill() { return smartFill; }
 
     /** Masked-chunk records only; used when Smart Fill turns off for a player. */
     public void clearMaskedChunks(UUID id) {
         maskedChunks.remove(id);
     }
 
-    // ── Cancelled-spawn tracking (re-sends entities once they're visible) ─
-
-    private void handleDestroyEntities(PacketSendEvent event, UUID playerId) {
-        Map<Integer, HiddenSpawn> m = hiddenSpawns.get(playerId);
-        if (m == null || m.isEmpty()) return;
-        try {
-            WrapperPlayServerDestroyEntities wrapper = new WrapperPlayServerDestroyEntities(event);
-            for (int id : wrapper.getEntityIds()) m.remove(id);
-        } catch (Exception ignored) {}
-    }
-
-    private void handleHiddenEntityMove(PacketSendEvent event, UUID playerId, PacketType.Play.Server type) {
-        Map<Integer, HiddenSpawn> m = hiddenSpawns.get(playerId);
-        if (m == null || m.isEmpty()) return;
-        try {
-            int entityId;
-            Vector3d abs = null;
-            double dx = 0, dy = 0, dz = 0;
-            if (type == PacketType.Play.Server.ENTITY_RELATIVE_MOVE) {
-                WrapperPlayServerEntityRelativeMove w = new WrapperPlayServerEntityRelativeMove(event);
-                entityId = w.getEntityId();
-                dx = w.getDeltaX(); dy = w.getDeltaY(); dz = w.getDeltaZ();
-            } else if (type == PacketType.Play.Server.ENTITY_RELATIVE_MOVE_AND_ROTATION) {
-                WrapperPlayServerEntityRelativeMoveAndRotation w = new WrapperPlayServerEntityRelativeMoveAndRotation(event);
-                entityId = w.getEntityId();
-                dx = w.getDeltaX(); dy = w.getDeltaY(); dz = w.getDeltaZ();
-            } else if (type == PacketType.Play.Server.ENTITY_TELEPORT) {
-                WrapperPlayServerEntityTeleport w = new WrapperPlayServerEntityTeleport(event);
-                entityId = w.getEntityId();
-                abs = w.getPosition();
-            } else {
-                WrapperPlayServerEntityPositionSync w = new WrapperPlayServerEntityPositionSync(event);
-                entityId = w.getId();
-                abs = w.getValues() != null ? w.getValues().getPosition() : null;
-            }
-
-            HiddenSpawn hs = m.get(entityId);
-            if (hs == null) return;
-            if (abs != null) {
-                hs.x = abs.getX(); hs.y = abs.getY(); hs.z = abs.getZ();
-            } else {
-                hs.x += dx; hs.y += dy; hs.z += dz;
-            }
-            int bx = (int) Math.floor(hs.x), by = (int) Math.floor(hs.y), bz = (int) Math.floor(hs.z);
-            entityYCache.put(entityId, new int[]{ bx, by, bz });
-
-            if (hs.resyncQueued) return;
-            Player player = Bukkit.getPlayer(playerId);
-            if (player == null || !player.isOnline()) return;
-            if (shouldHideSpawn(player, bx, by, bz)) return;
-
-            hs.resyncQueued = true;
-            PlatformUtil.runForEntity(plugin, player, () -> resyncEntity(player, entityId, hs));
-        } catch (Exception ignored) {}
-    }
 
     /**
-     * Periodic safety net for entities that stopped moving, or whose spawn
-     * became visible because the PLAYER moved or protection turned off.
-     * Must run on the player's own thread (Folia: the player's EntityScheduler).
+     * NEW: the hidden-zone half of the EntityHider decision (void-y floor /
+     * Smart Fill band). True if a block at this position is not real for the
+     * player right now, so an entity there must not be shown however clear
+     * the line of sight is. Netty-safe (cached state only) and safe on the
+     * player's thread.
      */
-    public void recheckHiddenSpawns(Player player) {
-        Map<Integer, HiddenSpawn> m = hiddenSpawns.get(player.getUniqueId());
-        if (m == null || m.isEmpty() || !player.isOnline()) return;
-        for (Map.Entry<Integer, HiddenSpawn> e : new ArrayList<>(m.entrySet())) {
-            HiddenSpawn hs = e.getValue();
-            if (hs.resyncQueued) continue;
-            if (shouldHideSpawn(player, (int) Math.floor(hs.x), (int) Math.floor(hs.y), (int) Math.floor(hs.z))) continue;
-            hs.resyncQueued = true;
-            resyncEntity(player, e.getKey(), hs);
-        }
-    }
-
-    /** Runs on the player's thread. Makes the server re-send the entity's spawn to this player. */
-    private void resyncEntity(Player player, int entityId, HiddenSpawn hs) {
-        Map<Integer, HiddenSpawn> m = hiddenSpawns.get(player.getUniqueId());
-        if (m == null || m.get(entityId) != hs) return;
-        if (!player.isOnline() || !plugin.isEnabled()) { hs.resyncQueued = false; return; }
-        if (shouldHideSpawn(player, (int) Math.floor(hs.x), (int) Math.floor(hs.y), (int) Math.floor(hs.z))) {
-            hs.resyncQueued = false;
-            return;
-        }
-        Entity entity = Bukkit.getEntity(hs.entityUuid);
-        if (entity == null) { m.remove(entityId, hs); return; }
-        // Folia: the entity lives in another region (so it's far away). Try again later.
-        if (!PlatformUtil.isOwnedByCurrentRegion(entity)) { hs.resyncQueued = false; return; }
-        m.remove(entityId, hs);
-
-        EntityHider hider = plugin.getEntityHider();
-        if (hider != null && hider.isHiddenFrom(player, entity)) return; // EntityHider shows it when appropriate
-
-        try {
-            // Hide+show forces the tracker to drop and re-add the player, which
-            // re-sends the spawn (plus metadata/equipment) to this client only.
-            player.hideEntity(plugin, entity);
-            player.showEntity(plugin, entity);
-            plugin.dbg("Re-sent previously hidden entity #" + entityId + " to " + player.getName());
-        } catch (Exception ex) {
-            plugin.getLogger().warning("[FPAntiFreeCam] Entity re-send failed: " + ex.getMessage());
-        }
-    }
-
-    /** Same decision as the SPAWN_ENTITY cancel path, from any context. */
-    private boolean shouldHideSpawn(Player player, int x, int y, int z) {
-        if (!plugin.isPieChartProtectionEnabled()) return false;
+    public boolean isEntityPositionHidden(Player player, int x, int y, int z) {
         World world = player.getWorld();
         if (world == null || !plugin.isWorldProtected(world.getName())) return false;
         if (!plugin.isProtectionActive(player) && !plugin.isSmartFillActiveFor(player)) return false;
-        if (!isAtOrBelowVoidY(player, y)) return false;
-        if (!plugin.isSmartFillEnabledFor(player)) return plugin.isProtectionActive(player);
-        return shouldCancelForPosition(player, y, x, z);
+        if (isAtOrBelowVoidY(player, y)) {
+            if (!plugin.isSmartFillEnabledFor(player)) return plugin.isProtectionActive(player);
+            return shouldCancelForPosition(player, y, x, z);
+        }
+        return isBandPositionHidden(player, x, y, z);
     }
 
-    private static final int    REVEAL_REFRESH_MOVE_SQ  = 4 * 4;
-    private static final double REVEAL_REFRESH_TURN_DOT = 0.9; // ~25 degrees
-    private static final double REVEAL_REFRESH_CLOSER_BLOCKS = 4.0;
+    /**
+     * BUGFIX: entities were only hidden at or below void-y, but Smart Fill
+     * also fills caves from void-y up to ceiling-y. A bat in one of those
+     * filled caves was sent anyway and flew around inside the fake stone.
+     * Same rules as the block fill in handleChunkData (surface structures,
+     * open sky, reveal). With no palette for the column yet, nothing there
+     * was filled, so the entity stays visible.
+     */
+    private boolean isBandPositionHidden(Player player, int x, int y, int z) {
+        if (!plugin.isSmartFillEnabledFor(player) || !plugin.isSmartFillActiveFor(player)) return false;
+        String worldName = player.getWorld().getName();
+        SmartFillEngine.ColumnPalette palette = smartFill.getCachedPalette(worldName, x >> 4, z >> 4);
+        if (palette == null) return false;
+        int top = SmartFillEngine.maskTop(palette, x & 15, z & 15,
+                Math.max(plugin.getVoidY(worldName), plugin.getSmartFillCeilingY()));
+        if (y > top) return false;
+        if (smartFill.isExemptSurfaceStructure(palette, x & 15, z & 15, y)) return false;
+        if (smartFill.isOpenToSky(palette, x & 15, z & 15, y)) return false;
+        SmartFillReveal reveal = plugin.getSmartFillReveal();
+        if (reveal == null) return false;
+        org.bukkit.Location loc = player.getLocation();
+        return !reveal.isAirRevealed(x, y, z, player.getUniqueId(),
+                loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
+    }
 
     /**
      * Clears the entire entity Y cache. Call on plugin disable or reload.

@@ -30,16 +30,18 @@ It works on the packets the server sends, so nothing in your world is changed. T
 - **Ores** are sent as stone, deepslate or netherrack until the player has a clear line of sight to them. An X-Ray pack shows nothing but rock.
 
 ## Requirements
-- **[PacketEvents 2.x](https://modrinth.com/plugin/packetevents)**
-- Spigot, Paper, Purpur or Folia, 1.19 or newer
+- **[PacketEvents 2.11.0 or newer](https://modrinth.com/plugin/packetevents)**
+- Spigot, Paper, Purpur or Folia, 1.19 – 26.3
+- Java 17 or newer
 
 ## Features
 
 - **Anti-FreeCam:** hides everything below a set Y level while players are on the surface.
 - **Smart Fill:** fills hidden areas with rock copied from the surrounding terrain instead of air, so it's hard to tell anything is hidden at all.
 - **Anti-Xray:** ores stay hidden until you can actually see them, including from the F5 camera. Ore lists and height ranges can be set per world.
+- **Entity hiding:** mobs and item frames inside hidden areas are hidden too (`chunk` mode, default). `raycast` mode also hides entities behind walls everywhere, like an ESP blocker, and can include players. The tab list is untouched.
 - **Hides more than blocks:** chests, signs, spawners, mobs, item frames, particles and sounds in hidden areas are hidden too, so the F3 pie chart and ESP mods can't find a base.
-- **Freecam mod detection:** checks on join whether the client has the Freecam mod installed, and runs the commands you choose (kick, ban, alert staff).
+- **Freecam mod detection (Paper):** checks on join whether the client has the Freecam mod installed, and runs the commands you choose (kick, ban, alert staff).
 - **Bedrock support:** works with Geyser and Floodgate.
 - **Folia support:** every check runs on the region thread that owns the area.
 - **Light on the network:** chunk refreshes are spread over ticks, and ore reveals are sent as small block updates, never whole chunks.
@@ -70,12 +72,13 @@ All commands need `fpantifreecam.admin`.
 | `fpantifreecam.debug` | Toggle debug mode | OP |
 | `fpantifreecam.world` | Manage protected worlds | OP |
 | `fpantifreecam.alerts` | Get Freecam detection alerts in chat | OP |
-| `fpantifreecam.bypass` | Skip both FreeCam protection and Anti-Xray | No one |
+| `fpantifreecam.bypass` | Skip FreeCam protection, Anti-Xray and entity hiding | No one |
 | `fpantifreecam.bypass.freecam` | Skip FreeCam protection only | No one |
 | `fpantifreecam.bypass.xray` | Skip Anti-Xray only | No one |
+| `fpantifreecam.bypass.entities` | Skip line-of-sight entity hiding only | No one |
 
 OPs are protected like everyone else. Give a bypass permission to staff or builders who need to see everything.
-`bypass.freecam` and `bypass.xray` override `bypass` when set, so `bypass: true` with `bypass.xray: false` keeps Anti-Xray on for that player.
+`bypass.freecam`, `bypass.xray` and `bypass.entities` override `bypass` when set, so `bypass: true` with `bypass.xray: false` keeps Anti-Xray on for that player.
 
 ## Config
 
@@ -85,199 +88,261 @@ OPs are protected like everyone else. Give a bypass permission to staff or build
 ```yaml
 # ─────────────────────────────────────────────────────────────────────
 #  FPAntiFreeCam configuration
-#  Anti-FreeCam protection for Spigot, Paper and Folia (1.19 - 26.1+)
-#  Apply changes with /fpac reload.
+#  Spigot, Paper and Folia (1.19 - 26.3). Apply changes with /fpac reload.
 # ─────────────────────────────────────────────────────────────────────
 
 # Do not change this manually.
-config-version: 5.4
+config-version: 5.8
 
 # ── General ──────────────────────────────────────────────────────────
 settings:
   # Check for updates on startup and tell admins on join.
   update-checker: true
 
-  # Language file to use, from plugins/FPAntiFreeCam/lang/<language>.yml
+  # File from plugins/FPAntiFreeCam/lang/<language>.yml
   language: "en"
 
-  # Print debug info to console. Keep false on a live server.
+  # Debug output in console. Keep false on a live server.
   debug-mode: false
 
-  # Minimum seconds between chunk refreshes for one player.
-  # Stops refresh spam when someone keeps crossing protection-y.
+  # Min seconds between chunk refreshes for one player.
   refresh-cooldown-seconds: 3
 
 # ── Worlds ───────────────────────────────────────────────────────────
-# Worlds where underground hiding is active.
-# Avoid the Nether and End, they can cause visual glitches.
+# Worlds where underground hiding is on. The Nether and End can glitch.
+# (Anti-Xray and entity hiding have their own world settings below.)
 worlds:
   list:
     - "world"
     # - "survival"
 
 # ── Protection ───────────────────────────────────────────────────────
-# How the Y levels fit together (defaults):
-#
-#   protection-y        64   At or above this, everything below void-y is hidden.
-#   deep-deactivation-y 20   Below this, protection is always off.
-#   void-y              15   Blocks at or below this are what gets hidden.
-#
-# Between deep-deactivation-y and protection-y, protection turns on only
-# when the player looks upward or has an open path up to the surface.
 # Rule: void-y < deep-deactivation-y < protection-y
+# Feet at or above protection-y: protection is on.
+# Between deep-deactivation-y and protection-y: on only while the player
+# looks up or has an open path to the surface.
+# Below deep-deactivation-y: off.
 protection:
-  # Roughly your world's surface height (64 for a normal overworld).
+  # The Y where protection turns on (player's feet). Set it to about your
+  # surface height (sea level is 63). While on, everything at or below
+  # void-y is hidden from that player. Also the default ceiling-y.
+  # Custom map and not sure of the surface height? Set this a bit too low
+  # rather than too high, and turn on replacement.smart-fill.follow-terrain
+  # so caves in higher terrain get hidden too.
   protection-y: 64.0
 
-  # How far below protection-y a player must go before protection turns
-  # off again. Stops flickering when jumping around at the surface.
+  # Blocks below protection-y before it turns off again (stops flicker).
   hysteresis-y: 2.0
 
-  # Blocks at or below this Y are hidden. Set it about 5 blocks above
-  # the highest point of the bases you want to protect.
+  # Blocks at or below this Y are hidden. ~5 above your highest base.
   void-y: 15
 
-  # Different void-y per world. Worlds not listed use void-y above.
+  # void-y per world. Unlisted worlds use void-y.
   # per-world-void-y:
   #   resource_world: 20
 
-  # Players below this Y always have protection off.
+  # Below this Y, protection is always off.
   deep-deactivation-y: 20.0
 
   # Also hide chests, signs, spawners, mobs, items, particles and sounds
-  # inside hidden areas. Stops the F3 pie chart and ESP mods from
-  # finding bases. Keep this on.
+  # in hidden areas (F3 pie chart, ESP). Keep this on.
   pie-chart-protection: true
 
-  # Smart Fill reveal: how much of the real cave around a player is shown.
-  # Only used when replacement.smart-fill.enabled is true.
+  # How much real cave is shown around a player (needs Smart Fill).
   smart-fill:
-    # Everything within this many blocks of the player is shown as real.
+    # Caves the player can walk or see into within this range are real.
     reveal-radius: 28
 
-    # Open space in the direction the player is looking is shown as real
-    # up to this many blocks away.
+    # Everything this close is always real, even through rock.
+    near-radius: 6
+
+    # Chunks this far ahead of the view get refreshed.
     look-distance: 48
 
-    # Seconds an area stays real after the player leaves it, so it doesn't
-    # flicker when they move back and forth. 0 = switch back instantly.
-    # Very high values make it easier to scout a base and freecam back later.
-    recently-revealed-ttl-seconds: 45
+    # Seconds an area stays real after leaving it. 0 = instant.
+    # High values make it easier to scout a base and come back with freecam.
+    recently-revealed-ttl-seconds: 20
 
-    # Show caves as far as the player can actually see across them, so big
-    # caverns don't show a wall of fake stone. Walls still block the view,
-    # so bases behind them stay hidden.
+    # Show caves as far as the player can see across them. Walls still block.
     reveal-line-of-sight: true
 
-    # Don't see further than the player's render distance.
+    # Cap that distance at the player's render distance.
     reveal-follow-render-distance: true
 
-    # Maximum line-of-sight distance in blocks (32-256).
+    # Max line-of-sight distance in blocks (32-256).
     reveal-max-distance-cap: 128
 
-    # Blocks checked per player each second for line of sight.
-    # Lower this if it costs too much server time.
+    # Blocks checked per player per second. Lower = less server time.
     reveal-sight-budget: 60000
 
 # ── What hidden blocks look like ─────────────────────────────────────
 replacement:
-  # Block shown instead of hidden blocks when Smart Fill is off.
+  # Shown instead of hidden blocks when Smart Fill is off.
   block-type: "air"
 
-  # Smart Fill: fill hidden areas with stone, deepslate and ores copied
-  # from nearby terrain, so they look like normal rock instead of a void.
+  # Fill hidden areas with rock and ores copied from nearby terrain
+  # instead of air.
   smart-fill:
     enabled: true
 
-    # Keep hiding distant caves while players are underground, not only
-    # while protection is on at the surface.
+    # Also hide distant caves while underground, not only near the surface.
     always-on: true
 
-    # Use plain hiding (below void-y) for Bedrock players instead of Smart
-    # Fill. Smart Fill re-sends chunks as players move, which Bedrock
-    # (Geyser) shows as glitchy chunk reloads. Needs Geyser or Floodgate.
+    # Bedrock (Geyser) shows Smart Fill refreshes as chunk reloads, so
+    # Bedrock players get plain hiding. Needs Geyser or Floodgate.
     disable-for-bedrock: true
 
-    # Top Y of the area Smart Fill hides. Defaults to protection-y.
+    # Caves up to this Y get hidden. Same number as protection-y unless
+    # you set it, but a different job: protection-y checks the player's
+    # height, ceiling-y is how high the hidden caves go.
     # ceiling-y: 64
 
-    # How many 16-block layers above and below to copy blocks from (0-4).
+    # 16-block layers above and below to copy blocks from (0-4).
     sample-radius-sections: 1
 
-    # Max different block types used in the fill (2-16).
+    # Max block types in the fill (2-16).
     max-palette-size: 6
 
-    # Block used when there is no nearby terrain to copy from.
+    # Used when there's no nearby terrain to copy.
     fallback-block: "stone"
 
-    # Small enclosed rooms near the surface (PvP arenas, crystal holes)
-    # are left alone instead of being filled. Note: a small, low hidden
-    # room near the surface would be left alone too.
+    # Small closed rooms near the surface (PvP arenas, crystal holes) are
+    # left as they are. A small hidden room there would be too.
     surface-structures:
-      # Only rooms with their roof at or above this Y.
+      # Roof at or above this Y.
       min-y: 30
-      # Only rooms at most this many blocks tall (1-32).
+      # At most this many blocks tall (1-32).
       max-pocket-height: 10
 
+    # Also hide caves and bases inside hills and mountains above
+    # ceiling-y. Only natural blocks count as cover, so builds and trees
+    # aren't touched. Overworld only. Costs a bit more CPU near mountains.
+    follow-terrain:
+      enabled: false
+      # Natural blocks needed above a spot before it's hidden (3-32).
+      min-cover: 6
+
 # ── Anti-Xray ────────────────────────────────────────────────────────
-# Ores are sent as the rock around them until the player has a clear
-# line of sight to them. Works in any world, not only those in worlds:.
+# Hidden blocks are sent as the rock around them until the player can
+# actually see them. Not tied to worlds.list.
 # Bypass: fpantifreecam.bypass.xray (or fpantifreecam.bypass).
-# If Paper's own anti-xray is on in the same world, turn one of them off.
+# Turns itself off (and sets enabled: false) if Paper's anti-xray is on.
 anti-xray:
   enabled: true
 
-  # Ores within this many blocks are always shown, without a raycast.
+  # Tell admins on join when Paper's anti-xray turned this off.
+  # Set to false if you're keeping Paper's.
+  paper-anti-xray-warning: true
+
+  # Blocks this close are always shown.
   always-reveal-radius: 3
 
-  # Max distance in blocks an ore can be revealed from (also capped by view distance).
+  # Max reveal distance (also capped by view distance).
   max-ray-distance: 64
 
-  # Ray steps per player per check. Lower if it costs too much server time.
+  # Ray steps per player per check. Lower = less server time.
   ray-budget: 20000
 
-  # Also test F5 front/back camera positions.
+  # Also check from the F5 camera positions.
   f5-aware: true
 
-  # Blocks a revealed ore stays revealed after the player moves away.
+  # A revealed block is hidden again once the player is this far away.
   forget-distance: 96
 
-  # Per-world settings. Worlds not listed use "default"; listed worlds
-  # inherit any key they leave out from "default".
+  # "default" is for Overworlds, "nether" and "the_end" for every world of
+  # that type. Missing keys come from "default". To set one world on its
+  # own, add it by name (e.g. world_nether:).
   worlds:
     default:
       enabled: true
       min-y: -64
-      # 320 covers mountain ores (emerald, iron and coal generate up there).
+      # 320 covers mountain ores.
       max-y: 320
-      hidden-ores: [coal_ore, deepslate_coal_ore, copper_ore, deepslate_copper_ore,
+      hidden-blocks: [coal_ore, deepslate_coal_ore, copper_ore, deepslate_copper_ore,
         iron_ore, deepslate_iron_ore, gold_ore, deepslate_gold_ore, redstone_ore,
         deepslate_redstone_ore, lapis_ore, deepslate_lapis_ore, diamond_ore,
         deepslate_diamond_ore, emerald_ore, deepslate_emerald_ore, raw_iron_block, raw_copper_block]
-    world_nether:
-      hidden-ores: [nether_gold_ore, nether_quartz_ore, ancient_debris, gilded_blackstone]
+    nether:
+      min-y: 0
       max-y: 128
-    world_the_end:
+      hidden-blocks: [nether_gold_ore, nether_quartz_ore, ancient_debris, gilded_blackstone]
+    the_end:
       enabled: false
+      min-y: 0
+      max-y: 256
+      hidden-blocks: [shulker_box, white_shulker_box, orange_shulker_box, magenta_shulker_box,
+        light_blue_shulker_box, yellow_shulker_box, lime_shulker_box, pink_shulker_box,
+        gray_shulker_box, light_gray_shulker_box, cyan_shulker_box, purple_shulker_box,
+        blue_shulker_box, brown_shulker_box, green_shulker_box, red_shulker_box, black_shulker_box]
 
 # ── Entities ─────────────────────────────────────────────────────────
 entities:
-  # Hide mobs, item frames, minecarts etc. inside hidden areas
-  # (mob farms, storage mobs) from protected players.
+  # Hide mobs, item frames, minecarts etc. in hidden areas.
   hide-entities: true
+
+  # How entities are hidden:
+  #   chunk   - only in areas Smart Fill hides (caves you can't see). Light on CPU.
+  #   raycast - also behind walls, checked by line of sight. Stops ESP, costs more CPU.
+  hide-mode: chunk
+
+  # Settings for hide-mode: raycast.
+  line-of-sight:
+    # Also hide players behind walls (stops player ESP). Tab list unchanged.
+    # Off by default: on an SMP, players expect to see each other.
+    # While the locator bar gamerule is on, players are never hidden,
+    # since the bar shows where they are anyway.
+    include-players: false
+
+    # Entities this close are always shown.
+    always-show-radius: 8
+
+    # Milliseconds an entity stays shown after going out of sight.
+    hide-delay-ms: 1500
+
+    # Ray steps per player per check. Lower = less server time.
+    ray-budget: 15000
+
+    # Also check from the F5 camera positions.
+    f5-aware: true
+
+    # Worlds where this is off.
+    disabled-worlds: []
+
+    # Entity types that are never hidden.
+    never-hide:
+      - ender_dragon
+      - wither
+      - lightning_bolt
+      - arrow
+      - spectral_arrow
+      - trident
+      - fireball
+      - small_fireball
+      - dragon_fireball
+      - wither_skull
+      - firework_rocket
+      - fishing_bobber
+      - ender_pearl
+      - snowball
+      - egg
+      - potion
+      - experience_bottle
+      - llama_spit
+      - shulker_bullet
+      - wind_charge
 
 # ── Notifications ────────────────────────────────────────────────────
 notifications:
   action-bar:
-    # Show an action bar message while a player is protected.
+    # Action bar message while a player is protected.
     enabled: false
     message-active: "&c☠ FreeCam Protected"
 
 # ── Anti-cheat ───────────────────────────────────────────────────────
 anti-cheat:
   freeze-detection:
-    # Warn in console when a protected player hasn't moved for this
-    # many seconds (can mean a position-spoofing freecam).
+    # Console warning when a protected player hasn't moved for this many
+    # seconds (can mean a position-spoofing freecam).
     enabled: false
     seconds: 30
 
@@ -286,47 +351,42 @@ performance:
   # Paper/Spigot: max chunks refreshed per tick (1-500).
   max-chunks-per-tick: 40
 
-  # Folia: max chunks re-sent to one player per tick (1-64). Smart Fill
-  # refreshes are spread out over ticks so they don't flood the network.
+  # Folia: max chunks re-sent to one player per tick (1-64).
   max-chunks-per-player-per-tick: 8
 
-  # When a player comes near protection-y, refresh a large radius at once
-  # so there is no moment where real blocks show.
+  # Near protection-y, refresh a big radius at once so real blocks never flash.
   instant-protection:
     enabled: true
     force-immediate-refresh: true
-    # Chunk radius to refresh.
+    # Chunk radius.
     instant-load-radius: 14
-    # How many blocks above protection-y this starts.
+    # Starts this many blocks above protection-y.
     pre-load-distance: 10
 
   # Only refresh chunks within this radius when protection changes.
-  # Chunks further out can briefly show real blocks until they reload.
-  # Leave off unless you need the performance.
+  # Chunks further out can show real blocks until they reload.
   limited-area:
     enabled: false
     chunk-radius: 4
 
 # ── Freecam mod detection ────────────────────────────────────────────
-# On join, a hidden anvil opens for a split second to check if the
-# player's client has the Freecam mod installed. Only runs once per join.
-# Test it with a real Freecam client before using a ban command.
+# On join, a hidden anvil opens for a moment to check for the Freecam mod. Once per join.
 freecam-detection:
   enabled: true
 
-  # Ticks the hidden anvil stays open (20 ticks = 1 second).
+  # Ticks the anvil stays open (20 = 1 second).
   probe-timeout-ticks: 5
 
-  # Print debug info about each check to console.
+  # Debug info about each check in console.
   debug: false
 
-  # Console commands run when a player is detected, in order.
+  # Console commands run on detection, in order.
   # Placeholders: %player%, %uuid%, %key%
   detected-commands:
     - "kick %player% &cFreecam detected"
     # - "ban %player% Freecam detected"
 
-  # Alert staff with the fpantifreecam.alerts permission and the console.
+  # Alert staff (fpantifreecam.alerts) and the console.
   alerts-enabled: true
   alert-message: "&8[&cFPAntiFreecam&8] &e%player% &7was flagged for &cFreecam &7(&8%key%&7)"
 ```

@@ -12,6 +12,7 @@ import org.bukkit.inventory.InventoryView;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -156,8 +157,9 @@ public final class FreecamDetector implements Listener {
         if (!enabled) return;
         UUID id = player.getUniqueId();
         // 60 ticks (3s) gives the client time to finish loading in before we
-        // pop a GUI open on them.
-        PlatformUtil.runTaskLater(plugin, () -> {
+        // pop a GUI open on them. BUGFIX (Folia): runs on the player's own
+        // thread, since hasBypass reads the player's permissions.
+        PlatformUtil.runForEntityLater(plugin, player, () -> {
             if (!player.isOnline()) return;
             if (plugin.isBedrockPlayer(player)) {
                 if (debug) plugin.getLogger().info("[FPAntiFreeCam] Skipped join-probe for "
@@ -171,7 +173,7 @@ public final class FreecamDetector implements Listener {
             }
             if (pendingProbes.containsKey(id)) return;
             probe(player);
-        }, 60L);
+        }, null, 60L);
     }
 
     private void probe(Player player) {
@@ -182,7 +184,7 @@ public final class FreecamDetector implements Listener {
             try {
                 InventoryView view = player.openAnvil(null, true);
                 if (view == null) return;
-                if (!(view.getTopInventory() instanceof AnvilInventory anvil)) return;
+                if (!(topInventory(view) instanceof AnvilInventory anvil)) return;
 
                 ItemStack probeItem = new ItemStack(org.bukkit.Material.PAPER);
                 ItemMeta   meta      = probeItem.getItemMeta();
@@ -206,17 +208,75 @@ public final class FreecamDetector implements Listener {
                     // probe item to the player's inventory on close.
                     PlatformUtil.runForEntity(plugin, player, () -> {
                         if (!player.isOnline()) return;
-                        if (player.getOpenInventory().getTopInventory() instanceof AnvilInventory openAnvil) {
-                            openAnvil.clear();
-                            player.closeInventory();
-                        }
+                        closeProbe(player);
                     });
                 }, probeTimeoutTicks);
-            } catch (Exception e) {
-                plugin.dbg("FreecamDetector probe failed for " + player.getName() + ": " + e.getMessage());
+            } catch (Throwable e) {
+                plugin.dbg("FreecamDetector probe failed for " + player.getName() + ": " + e);
                 pendingProbes.remove(player.getUniqueId());
             }
         });
+    }
+
+    // BUGFIX: InventoryView is a class up to 1.20.6 and an interface from
+    // 1.21. This jar is built against 1.19.4, so direct calls on it can throw
+    // IncompatibleClassChangeError on newer servers. They go through
+    // reflection here, which works with both.
+    private static Method viewTop, viewPlayer, anvilRename, viewRename;
+
+    private static Object call(Object target, Method m) {
+        try {
+            return target != null && m != null ? m.invoke(target) : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static Method method(Class<?> c, String name) {
+        try {
+            return c.getMethod(name);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static Method method(String cls, String name) {
+        try {
+            return Class.forName(cls).getMethod(name);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    static {
+        viewTop = method(InventoryView.class, "getTopInventory");
+        viewPlayer = method(InventoryView.class, "getPlayer");
+        anvilRename = method(AnvilInventory.class, "getRenameText");
+        viewRename = method("org.bukkit.inventory.view.AnvilView", "getRenameText"); // 1.21+
+    }
+
+    private static Object topInventory(Object view) {
+        return call(view, viewTop);
+    }
+
+    private static void closeProbe(Player player) {
+        Object view;
+        try {
+            view = player.getOpenInventory();
+        } catch (Throwable t) {
+            return;
+        }
+        if (topInventory(view) instanceof AnvilInventory openAnvil) {
+            openAnvil.clear();
+            player.closeInventory();
+        }
+    }
+
+    /** Anvil rename text: the 1.21+ view method first, then the old inventory one. */
+    private static String renameText(PrepareAnvilEvent event, Object view) {
+        Object r = viewRename != null && viewRename.getDeclaringClass().isInstance(view) ? call(view, viewRename) : null;
+        if (r == null) r = call(event.getInventory(), anvilRename);
+        return r instanceof String ? (String) r : null;
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -226,12 +286,18 @@ public final class FreecamDetector implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
     public void onPrepareAnvil(PrepareAnvilEvent event) {
         if (!enabled) return;
-        if (!(event.getView().getPlayer() instanceof Player player)) return;
+        Object view;
+        try {
+            view = event.getView();
+        } catch (Throwable t) {
+            return;
+        }
+        if (!(call(view, viewPlayer) instanceof Player player)) return;
 
         PendingProbe pending = pendingProbes.get(player.getUniqueId());
         if (pending == null) return;
 
-        String renameText = event.getInventory().getRenameText();
+        String renameText = renameText(event, view);
         if (renameText == null || renameText.isEmpty()) return;
 
         if (debug) {
@@ -260,10 +326,7 @@ public final class FreecamDetector implements Listener {
 
         PlatformUtil.runForEntity(plugin, player, () -> {
             if (!player.isOnline()) return;
-            if (player.getOpenInventory().getTopInventory() instanceof AnvilInventory openAnvil) {
-                openAnvil.clear();
-                player.closeInventory();
-            }
+            closeProbe(player);
         });
 
         PlatformUtil.runTask(plugin, () -> {

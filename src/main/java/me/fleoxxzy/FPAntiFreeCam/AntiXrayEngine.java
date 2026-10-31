@@ -61,6 +61,9 @@ public final class AntiXrayEngine {
     private volatile int     forgetDistance = 96;
     private volatile Map<String, WorldSettings> worldSettings = Collections.emptyMap();
     private volatile WorldSettings defaultSettings = WorldSettings.DISABLED;
+    /** NEW: used by worlds of that dimension without their own entry. */
+    private volatile WorldSettings netherSettings = WorldSettings.DISABLED;
+    private volatile WorldSettings endSettings = WorldSettings.DISABLED;
 
     /**
      * Single block updates this close to the player's eye are always sent
@@ -83,6 +86,11 @@ public final class AntiXrayEngine {
             "redstone_ore", "deepslate_redstone_ore", "lapis_ore", "deepslate_lapis_ore",
             "diamond_ore", "deepslate_diamond_ore", "emerald_ore", "deepslate_emerald_ore",
             "raw_iron_block", "raw_copper_block");
+
+    /** NEW: built-in Nether settings, used when config.yml has no "nether" entry. */
+    private static final List<String> DEFAULT_NETHER_ORES = Arrays.asList(
+            "nether_gold_ore", "nether_quartz_ore", "ancient_debris", "gilded_blackstone");
+    private static final int DEFAULT_NETHER_MAX_Y = 128;
 
     static final int ENV_OVERWORLD = 0, ENV_NETHER = 1, ENV_END = 2;
 
@@ -184,15 +192,25 @@ public final class AntiXrayEngine {
         Map<String, WorldSettings> map = new HashMap<>();
         if (worlds != null) {
             for (String name : worlds.getKeys(false)) {
-                if (name.equalsIgnoreCase("default")) continue;
+                if (name.equalsIgnoreCase("default") || name.equalsIgnoreCase("nether")
+                        || name.equalsIgnoreCase("the_end")) continue;
                 map.put(name, parseWorld(worlds.getConfigurationSection(name), def, keysById));
             }
         }
+        // Dimension entries inherit from "default" like world entries. Without
+        // one, the Nether gets the built-in Nether ores and the End is off.
+        ConfigurationSection netherSec = worlds != null ? worlds.getConfigurationSection("nether") : null;
+        WorldSettings netherBase = new WorldSettings(def.enabled, def.minY, DEFAULT_NETHER_MAX_Y,
+                normalizeKeys(DEFAULT_NETHER_ORES), new BitSet());
+        netherSettings = parseWorld(netherSec, netherBase, keysById);
+        ConfigurationSection endSec = worlds != null ? worlds.getConfigurationSection("the_end") : null;
+        endSettings = endSec != null ? parseWorld(endSec, def, keysById) : WorldSettings.DISABLED;
         defaultSettings = def;
         worldSettings = map;
         statsSince = System.currentTimeMillis();
         enabled = true;
         plugin.dbg("Anti-Xray loaded: default ores=" + def.oreKeys.size() + " ids=" + def.hiddenIds.cardinality()
+                + " nether ores=" + netherSettings.oreKeys.size() + " end=" + endSettings.enabled
                 + " worlds=" + map.keySet());
     }
 
@@ -205,7 +223,10 @@ public final class AntiXrayEngine {
             if (sec.contains("enabled")) en = sec.getBoolean("enabled");
             if (sec.contains("min-y")) minY = sec.getInt("min-y");
             if (sec.contains("max-y")) maxY = sec.getInt("max-y");
-            if (sec.isList("hidden-ores")) keys = normalizeKeys(sec.getStringList("hidden-ores"));
+            // IMPROVEMENT: renamed to hidden-blocks (any block can be listed);
+            // hidden-ores from older configs is still read.
+            if (sec.isList("hidden-blocks")) keys = normalizeKeys(sec.getStringList("hidden-blocks"));
+            else if (sec.isList("hidden-ores")) keys = normalizeKeys(sec.getStringList("hidden-ores"));
         }
         BitSet ids = new BitSet(keysById.length);
         Set<String> found = new HashSet<>();
@@ -219,7 +240,7 @@ public final class AntiXrayEngine {
         // Registry-key matching: unknown keys (block missing on this
         // version, or a typo) are skipped instead of failing the load.
         for (String k : keys) {
-            if (!found.contains(k)) plugin.dbg("Anti-Xray: unknown ore key '" + k + "' skipped");
+            if (!found.contains(k)) plugin.dbg("Anti-Xray: unknown block key '" + k + "' skipped");
         }
         return new WorldSettings(en, minY, maxY, Collections.unmodifiableSet(keys), ids);
     }
@@ -341,7 +362,18 @@ public final class AntiXrayEngine {
     WorldSettings settingsFor(String worldName) {
         if (!enabled) return WorldSettings.DISABLED;
         WorldSettings s = worldName != null ? worldSettings.get(worldName) : null;
-        return s != null ? s : defaultSettings;
+        if (s != null) return s;
+        // IMPROVEMENT: worlds without their own entry use the settings for
+        // their dimension, so a Nether not named "world_nether" (Multiverse,
+        // a different level-name) still hides Nether ores instead of getting
+        // the Overworld list. Dimension comes from the cached WorldMeta, so
+        // this stays Netty-safe.
+        WorldMeta m = worldName != null ? worldMeta.get(worldName) : null;
+        if (m != null) {
+            if (m.env == ENV_NETHER) return netherSettings;
+            if (m.env == ENV_END) return endSettings;
+        }
+        return defaultSettings;
     }
 
     /** Netty-safe: config + cached bypass only. */
@@ -361,6 +393,7 @@ public final class AntiXrayEngine {
     public boolean isAnyHiddenOre(int id) {
         if (!isEnabled() || id < 0) return false;
         if (defaultSettings.hiddenIds.get(id)) return true;
+        if (netherSettings.hiddenIds.get(id) || endSettings.hiddenIds.get(id)) return true;
         for (WorldSettings s : worldSettings.values()) if (s.hiddenIds.get(id)) return true;
         return false;
     }
@@ -524,6 +557,22 @@ public final class AntiXrayEngine {
 
     static int localIndex(int x, int y, int z, int minY) {
         return ((y - minY) << 8) | ((z & 15) << 4) | (x & 15);
+    }
+
+    /**
+     * BUGFIX: true if this block is currently sent to the player as a fake
+     * block. Its block entity (shulker box, chest...) must not be sent either,
+     * or the position and type leak. Any thread.
+     */
+    public boolean isMasked(Player player, int x, int y, int z) {
+        PlayerXray px = players.get(player.getUniqueId());
+        if (px == null || px.chunks.isEmpty()) return false;
+        long ck = columnKey(x >> 4, z >> 4);
+        ChunkOres co = px.chunks.get(ck);
+        if (co == null) return false;
+        int li = localIndex(x, y, z, co.minY);
+        int[] e = co.entry(li);
+        return e != null && e[0] >= 0 && e[1] > 0 && !px.isRevealed(ck, li);
     }
 
     /** Client dropped this chunk (UNLOAD_CHUNK): forget its ores and reveals. */
@@ -872,18 +921,18 @@ public final class AntiXrayEngine {
      * look wrong. Detected per world by looking at the class of
      * Level.chunkPacketBlockController: the base ChunkPacketBlockController is
      * Paper's no-op, anything else means anti-xray is on. Reflection only,
-     * fails silently on Spigot or if internals change. Main thread.
+     * fails silently on Spigot or if internals change. Main / global thread.
+     *
+     * <p>IMPROVEMENT: only reports the worlds now. Whether that turns this
+     * Anti-Xray off is decided in FPAntiFreeCam#checkPaperAntiXrayConflict,
+     * which also has to know about Paper's when ours is already off (join warning).
      */
-    public void checkPaperAntiXray() {
-        if (!isEnabled()) return;
+    public List<String> paperAntiXrayWorlds() {
+        List<String> out = new ArrayList<>();
         for (World w : Bukkit.getWorlds()) {
-            if (!settingsFor(w.getName()).enabled) continue;
-            if (Boolean.TRUE.equals(paperAntiXrayEnabled(w))) {
-                plugin.getLogger().warning("[FPAntiFreeCam] Paper anti-xray is enabled in world '" + w.getName()
-                        + "' while FPAntiFreeCam Anti-Xray is on. Set anticheat.anti-xray.enabled: false in that"
-                        + " world's paper-world config, or disable anti-xray for it in config.yml.");
-            }
+            if (Boolean.TRUE.equals(paperAntiXrayEnabled(w))) out.add(w.getName());
         }
+        return out;
     }
 
     private static Boolean paperAntiXrayEnabled(World w) {
