@@ -994,6 +994,18 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         refreshFullView(player, false);
     }
 
+    /**
+     * BUGFIX (lag spikes): with Smart Fill always-on, the chunks a player is
+     * sent are the same whether protection is on or off, so the full
+     * view-distance resend on every on/off switch changed nothing. Each one
+     * still rebuilt every chunk in view on the main thread and masked it
+     * again. Boats at sea level switch on every mount and dismount, which
+     * showed up as server-wide lag spikes. Main/region thread.
+     */
+    private boolean chunksIgnoreHiddenState(Player player) {
+        return smartFillAlwaysOn && isSmartFillActiveFor(player);
+    }
+
     // BUGFIX (Folia): commands run on the sender's thread, and other
     // players' location and permissions may only be read on their own.
     // Spigot / Paper: runs straight away, as before.
@@ -1520,13 +1532,28 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (now - pendingStart < debounce) return;
 
         raycastDeactivationPending.remove(id);
+        boolean chunksSame = chunksIgnoreHiddenState(player); // before the disarm flag changes
         playerHiddenState.put(id, targetHidden);
         if (targetHidden) smartFillDisarmedForRelog.remove(id); // naturally reached the surface
         if (entityHider != null) entityHider.updateFor(player);
-        refreshFullView(player, !targetHidden); // bypass cooldown when turning OFF
+        refreshAfterStateChange(player, targetHidden, chunksSame);
 
         dbg("Layer transition " + (targetHidden ? "ON" : "OFF") + " for "
                 + player.getName() + " at Y=" + String.format("%.1f", feetY));
+    }
+
+    /**
+     * Re-sends the view after protection turned on or off. Turning off skips
+     * the cooldown so the player never keeps seeing void. Skipped when the
+     * chunks would come out the same (see chunksIgnoreHiddenState); pass
+     * that value from before the state changed. Player's thread.
+     */
+    private void refreshAfterStateChange(Player player, boolean nowHidden, boolean chunksSame) {
+        if (chunksSame) {
+            dbg("No view refresh needed for " + player.getName() + " (Smart Fill always-on)");
+            return;
+        }
+        refreshFullView(player, !nowHidden);
     }
 
     /**
@@ -1729,6 +1756,18 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public void onPlayerTeleport(PlayerTeleportEvent event) {
         Player player = event.getPlayer();
         if (internallyTeleporting.contains(player.getUniqueId())) return;
+        // BUGFIX (vehicles): getting out of a boat or minecart fires a
+        // DISMOUNT teleport. When it crossed protection-y it was cancelled
+        // and redone a tick later, so the player could get stuck on the
+        // boat or snap back. The state is now checked once the player has
+        // landed, which also covers mounts that fire no VehicleExitEvent.
+        // By name, so servers without the constant still load.
+        if (event.getCause() != null && "DISMOUNT".equals(event.getCause().name())) {
+            PlatformUtil.runForEntityLater(this, player, () -> {
+                if (player.isOnline()) checkVehicleStateChange(player);
+            }, null, 1L);
+            return;
+        }
         if (smartFillReveal != null) smartFillReveal.clearSight(player.getUniqueId());
         // NEW: re-check entities at the destination straight away. updateFor
         // runs on the player's scheduler, so after the teleport finished.
@@ -1756,6 +1795,24 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         boolean newHidden = !bypass && to.getY() >= protectionY;
 
         if (oldHidden == newHidden) return;
+
+        // BUGFIX (vehicles): the teleport below is cancelled and redone
+        // without the original flags. Bukkit refuses to teleport a player
+        // carrying passengers that way, and kicks one riding a vehicle off it,
+        // so those teleports failed or lost the vehicle. For them the state
+        // is set now and the view refreshed once the teleport is done.
+        if (player.isInsideVehicle() || !player.getPassengers().isEmpty()) {
+            boolean chunksSame = chunksIgnoreHiddenState(player);
+            raycastDeactivationPending.remove(id);
+            playerHiddenState.put(id, newHidden);
+            if (newHidden) smartFillDisarmedForRelog.remove(id);
+            PlatformUtil.runForEntityLater(this, player, () -> {
+                if (!player.isOnline()) return;
+                if (entityHider != null) entityHider.updateFor(player);
+                refreshAfterStateChange(player, newHidden, chunksSame);
+            }, null, 1L);
+            return;
+        }
 
         if (!newHidden) {
             event.setCancelled(true);
@@ -1864,7 +1921,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         }
 
         UUID    id     = player.getUniqueId();
-        boolean bypass = hasBypass(player);
+        // BUGFIX (lag): this ran up to 6 permission lookups on every Y block
+        // crossing, and a boat bobbing on a block edge crosses it many times a
+        // second. Game mode changes, /fpac bypass and reloads still refresh
+        // the flag straight away.
+        boolean bypass = hasBypassThrottled(player);
 
         if (freezeDetectionEnabled) trackSignificantMove(id, to);
 
@@ -1905,11 +1966,14 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         dbg("Move transition " + player.getName() + ": " + oldHidden
                 + " → " + newHidden + " at Y=" + to.getY());
+        boolean chunksSame = chunksIgnoreHiddenState(player); // before the disarm flag changes
         playerHiddenState.put(id, newHidden);
         if (newHidden) smartFillDisarmedForRelog.remove(id); // naturally reached the surface
         if (entityHider != null) entityHider.updateFor(player);
 
-        if (!newHidden) {
+        if (chunksSame) {
+            refreshAfterStateChange(player, newHidden, true);
+        } else if (!newHidden) {
             // BUGFIX: bypass cooldown when revealing – never leave player seeing void
             refreshFullView(player, true);
         } else {
@@ -2029,30 +2093,49 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         }, null, 1L);
     }
 
+    /**
+     * BUGFIX (boat lag spikes): this used a plain "feet at or above
+     * protection-y" check with no hysteresis and no raycast zone. A boat on
+     * the ocean sits at about Y 62-63, just under the default protection-y,
+     * so every mount and dismount at sea turned protection off with a full
+     * view resend, and the raycast task turned it back on (open sky) with a
+     * second one a moment later. Many players at a dock, or boat plugins
+     * that remount often, stacked those into server-wide lag spikes. It now
+     * uses the same layers as onPlayerMove: on at protection-y, off below
+     * deep-deactivation-y (immediately), the raycast task decides in between.
+     */
     private void checkVehicleStateChange(Player player) {
         if (!isWorldProtected(player.getWorld().getName())) return;
-        boolean bypass = hasBypass(player);
         UUID id = player.getUniqueId();
+        boolean bypass = hasBypassThrottled(player);
+        double y = player.getLocation().getY();
         boolean currentHidden = Boolean.TRUE.equals(playerHiddenState.get(id));
-        boolean targetHidden = !bypass && player.getLocation().getY() >= protectionY;
-
-        if (currentHidden != targetHidden) {
-            playerHiddenState.put(id, targetHidden);
-            if (targetHidden) smartFillDisarmedForRelog.remove(id); // naturally reached the surface
-            // BUGFIX: this used to only run when arming (targetHidden == true), so
-            // dismounting a vehicle while descending below protectionY never re-showed
-            // entities EntityHider had hidden — they'd stay hidden until some unrelated
-            // state change happened to trigger updateFor(). Both directions need it.
-            if (entityHider != null) entityHider.updateFor(player);
-            PlatformUtil.runForEntity(this, player, () -> {
-                if (!player.isOnline()) return;
-                if (targetHidden) {
-                    refreshFullView(player);
-                } else {
-                    refreshFullView(player, true);
-                }
-            });
+        boolean targetHidden;
+        if (bypass) {
+            targetHidden = false;
+        } else if (y >= protectionY) {
+            targetHidden = true;
+        } else if (y < deepDeactivationY) {
+            targetHidden = false;
+        } else {
+            return; // raycast zone: the raycast task decides
         }
+        if (currentHidden == targetHidden) return;
+
+        dbg("Vehicle transition " + player.getName() + ": " + currentHidden
+                + " → " + targetHidden + " at Y=" + String.format("%.1f", y));
+        raycastDeactivationPending.remove(id);
+        boolean chunksSame = chunksIgnoreHiddenState(player); // before the disarm flag changes
+        playerHiddenState.put(id, targetHidden);
+        if (targetHidden) smartFillDisarmedForRelog.remove(id); // naturally reached the surface
+        // BUGFIX: this used to only run when arming (targetHidden == true), so
+        // dismounting a vehicle while descending below protectionY never re-showed
+        // entities EntityHider had hidden — they'd stay hidden until some unrelated
+        // state change happened to trigger updateFor(). Both directions need it.
+        if (entityHider != null) entityHider.updateFor(player);
+        PlatformUtil.runForEntity(this, player, () -> {
+            if (player.isOnline()) refreshAfterStateChange(player, targetHidden, chunksSame);
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════
