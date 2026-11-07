@@ -116,19 +116,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private final Set<UUID> manualBypass = ConcurrentHashMap.newKeySet();
 
     /**
-     * BUGFIX: Smart Fill's always-on activation is intentionally decoupled
-     * from playerHiddenState (see isSmartFillActiveFor()'s javadoc) so it can
-     * keep hiding distant caves/bases while a player legitimately mines
-     * nearby - but that meant a player who joined or changed world WHILE
-     * ALREADY UNDERGROUND got camouflage/hard-floor masking applied to their
-     * own surroundings from the very first chunk packet, with nothing able
-     * to disarm it (the raycast/hysteresis system only ever governs the
-     * surface-triggered flat mode, never Smart Fill). Players in this set
-     * have Smart Fill fully disarmed until they naturally reach protectionY
-     * on their own, matching the original request that relogging underground
-     * should show everything normally instead of any masking.
+     * BUGFIX (1.5.4): a full refresh skipped by the cooldown used to be lost,
+     * so the client could keep real chunks it got while protection was off.
+     * Players here get one retry when their cooldown ends.
      */
-    private final Set<UUID> smartFillDisarmedForRelog = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> pendingFullRefresh = ConcurrentHashMap.newKeySet();
 
     /**
      * PERF: Thread-safe bypass cache for Netty-thread access.
@@ -488,7 +480,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         lastSignificantMoveLoc.clear();
         smartFillLastChunkKey.clear();
         smartFillRefreshCooldown.clear();
-        smartFillDisarmedForRelog.clear();
+        pendingFullRefresh.clear();
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -689,7 +681,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (!isSmartFillEnabledFor(player)) return false;
         if (!isWorldProtected(player.getWorld().getName())) return false;
         if (Boolean.TRUE.equals(bypassCache.get(player.getUniqueId()))) return false;
-        if (smartFillDisarmedForRelog.contains(player.getUniqueId())) return false;
         if (smartFillAlwaysOn) return true;
         return isProtectionActive(player);
     }
@@ -962,7 +953,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public void handlePlayerInitialState(Player player, boolean immediateRefresh) {
         if (!isWorldProtected(player.getWorld().getName())) {
             boolean wasCached = playerHiddenState.remove(player.getUniqueId()) != null;
-            smartFillDisarmedForRelog.remove(player.getUniqueId());
             if (wasCached && immediateRefresh) refreshFullView(player);
             return;
         }
@@ -971,17 +961,13 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         boolean shouldHide = !bypass && player.getLocation().getY() >= protectionY;
         playerHiddenState.put(player.getUniqueId(), shouldHide);
 
-        // BUGFIX: see smartFillDisarmedForRelog's javadoc - a player who
-        // joins or changes world while already underground gets Smart Fill
-        // disarmed entirely until they naturally surface, instead of having
-        // camouflage/hard-floor masking applied to their own surroundings
-        // from the very first chunk packet with no way to reveal it.
-        if (!bypass && !shouldHide && smartFillEnabled) {
-            smartFillDisarmedForRelog.add(player.getUniqueId());
-            dbg("Smart Fill disarmed for relog: " + player.getName() + " joined/changed world underground");
-        } else {
-            smartFillDisarmedForRelog.remove(player.getUniqueId());
-        }
+        // BUGFIX (1.5.4): Smart Fill used to be switched off for anyone who
+        // joined or changed world underground, until they reached the
+        // surface. Relogging in a hole then showed every cave and chest
+        // around, and the real chunks stayed after going back up. It stays
+        // on now: until the first flood fill is ready the reveal sphere
+        // keeps the player's own area real, and the first fill starts now.
+        if (!bypass && smartFillReveal != null) smartFillReveal.updateLosReveal(player);
 
         dbg("InitialState " + player.getName() + " hidden=" + shouldHide
                 + " Y=" + String.format("%.1f", player.getLocation().getY()));
@@ -1023,8 +1009,12 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         long now = System.currentTimeMillis();
         if (!bypassCooldown) {
             long expiration = refreshCooldowns.getOrDefault(player.getUniqueId(), 0L);
-            if (now < expiration) return;
+            if (now < expiration) {
+                pendingFullRefresh.add(player.getUniqueId());
+                return;
+            }
         }
+        pendingFullRefresh.remove(player.getUniqueId());
 
         // BUGFIX: Bukkit.getViewDistance() only returns the GLOBAL server.properties
         // default, not the actual per-world/per-player view distance Paper lets you
@@ -1042,6 +1032,22 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 + " (bypass=" + bypassCooldown + ")");
         performRefresh(player, radius);
         if (!bypassCooldown) refreshCooldowns.put(player.getUniqueId(), now + refreshCooldownMs);
+    }
+
+    /**
+     * BUGFIX (1.5.4): runs a full refresh the cooldown skipped, once the
+     * cooldown is over. Player's thread.
+     */
+    private void retryPendingRefresh(Player player) {
+        UUID id = player.getUniqueId();
+        if (!pendingFullRefresh.contains(id)) return;
+        if (System.currentTimeMillis() < refreshCooldowns.getOrDefault(id, 0L)) return;
+        if (!isWorldProtected(player.getWorld().getName())) {
+            pendingFullRefresh.remove(id);
+            return;
+        }
+        dbg("Retrying skipped full refresh for " + player.getName());
+        refreshFullView(player, false);
     }
 
     private void performRefresh(Player player, int radius) {
@@ -1125,6 +1131,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
     private void runPlayerRaycasts(Player p, boolean freecam, boolean xray, boolean entities) {
         if (freecam) {
+            retryPendingRefresh(p);
             if (raycastEnabled) checkRaycastActivation(p);
             if (smartFillReveal != null) smartFillReveal.updateLosReveal(p);
         }
@@ -1297,6 +1304,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
      * (ChunkListener#shouldRefreshForReveal).
      */
     private void maybeRefreshSmartFillProximity(Player player) {
+        retryPendingRefresh(player);
         if (!isSmartFillActiveFor(player)) {
             if (chunkListener != null) chunkListener.clearMaskedChunks(player.getUniqueId());
             return;
@@ -1532,9 +1540,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (now - pendingStart < debounce) return;
 
         raycastDeactivationPending.remove(id);
-        boolean chunksSame = chunksIgnoreHiddenState(player); // before the disarm flag changes
+        boolean chunksSame = chunksIgnoreHiddenState(player);
         playerHiddenState.put(id, targetHidden);
-        if (targetHidden) smartFillDisarmedForRelog.remove(id); // naturally reached the surface
         if (entityHider != null) entityHider.updateFor(player);
         refreshAfterStateChange(player, targetHidden, chunksSame);
 
@@ -1718,7 +1725,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         smartFillLastChunkKey.remove(id);
         smartFillRefreshCooldown.remove(id);
         smartFillSightBacklog.remove(id);
-        smartFillDisarmedForRelog.remove(id);
+        pendingFullRefresh.remove(id);
         dbg("Cleaned up quit player: " + event.getPlayer().getName());
     }
 
@@ -1805,7 +1812,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             boolean chunksSame = chunksIgnoreHiddenState(player);
             raycastDeactivationPending.remove(id);
             playerHiddenState.put(id, newHidden);
-            if (newHidden) smartFillDisarmedForRelog.remove(id);
             PlatformUtil.runForEntityLater(this, player, () -> {
                 if (!player.isOnline()) return;
                 if (entityHider != null) entityHider.updateFor(player);
@@ -1857,7 +1863,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             PlatformUtil.runForEntity(this, player, () -> {
                 if (!player.isOnline()) return;
                 playerHiddenState.put(id, true);
-                smartFillDisarmedForRelog.remove(id); // naturally reached the surface
                 internallyTeleporting.add(id);
                 // BUGFIX: see comment above – use teleportAsync() on Folia-safe path.
                 PlatformUtil.teleport(player, dest).whenComplete((success, throwable) ->
@@ -1966,9 +1971,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
 
         dbg("Move transition " + player.getName() + ": " + oldHidden
                 + " → " + newHidden + " at Y=" + to.getY());
-        boolean chunksSame = chunksIgnoreHiddenState(player); // before the disarm flag changes
+        boolean chunksSame = chunksIgnoreHiddenState(player);
         playerHiddenState.put(id, newHidden);
-        if (newHidden) smartFillDisarmedForRelog.remove(id); // naturally reached the surface
         if (entityHider != null) entityHider.updateFor(player);
 
         if (chunksSame) {
@@ -1981,9 +1985,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             long expiration = refreshCooldowns.getOrDefault(id, 0L);
             if (now < expiration) {
                 dbg("Refresh cooldown active for " + player.getName()
-                        + " (expires in " + (expiration - now) + " ms)");
+                        + " (expires in " + (expiration - now) + " ms, retry queued)");
+                pendingFullRefresh.add(id);
                 return;
             }
+            pendingFullRefresh.remove(id);
 
             // BUGFIX: see the comment in refreshFullView() above — same issue,
             // same fix. Bukkit.getViewDistance() ignored per-world overrides.
@@ -2068,7 +2074,6 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             });
         } else if (!willBypass && !currentHidden && player.getLocation().getY() >= protectionY) {
             playerHiddenState.put(id, true);
-            smartFillDisarmedForRelog.remove(id); // naturally reached the surface
             if (entityHider != null) entityHider.updateFor(player);
             PlatformUtil.runForEntity(this, player, () -> {
                 if (player.isOnline()) refreshFullView(player); // refresh view to hide
@@ -2125,9 +2130,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         dbg("Vehicle transition " + player.getName() + ": " + currentHidden
                 + " → " + targetHidden + " at Y=" + String.format("%.1f", y));
         raycastDeactivationPending.remove(id);
-        boolean chunksSame = chunksIgnoreHiddenState(player); // before the disarm flag changes
+        boolean chunksSame = chunksIgnoreHiddenState(player);
         playerHiddenState.put(id, targetHidden);
-        if (targetHidden) smartFillDisarmedForRelog.remove(id); // naturally reached the surface
         // BUGFIX: this used to only run when arming (targetHidden == true), so
         // dismounting a vehicle while descending below protectionY never re-showed
         // entities EntityHider had hidden — they'd stay hidden until some unrelated
@@ -2419,8 +2423,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         statsHeader(sender, "Smart Fill");
         if (smartFillEnabled) {
             statsRow(sender, "Palettes", "&f" + (chunkListener != null ? chunkListener.getSmartFillCacheSize() : 0)
-                    + " &7cached &8· &7sample &f" + smartFillSampleRadius + " &8· &7max size &f" + smartFillMaxPaletteSize
-                    + (smartFillDisarmedForRelog.isEmpty() ? "" : " &8· &e" + smartFillDisarmedForRelog.size() + " &7awaiting relog"));
+                    + " &7cached &8· &7sample &f" + smartFillSampleRadius + " &8· &7max size &f" + smartFillMaxPaletteSize);
             if (smartFillReveal != null) {
                 String[] r = smartFillReveal.statsRows();
                 statsRow(sender, "Reveal", r[0]);

@@ -731,7 +731,7 @@ public final class ChunkListener implements PacketListener {
 
                                 // Smart Fill camouflage band
                                 StateType type = current != null ? current.getType() : StateTypes.AIR;
-                                if (SmartFillEngine.isSafeTerrain(type)) continue; // already looks natural
+                                if (current != null && SmartFillEngine.isSafeTerrain(current)) continue; // already looks natural
 
                                 // BUGFIX: previously anything between hardFloorY and
                                 // ceilingY that wasn't "safe terrain" got filled
@@ -930,8 +930,7 @@ public final class ChunkListener implements PacketListener {
                 return;
             }
 
-            StateType type = wrapper.getBlockState().getType();
-            if (SmartFillEngine.isSafeTerrain(type)) return; // already looks natural
+            if (SmartFillEngine.isSafeTerrain(wrapper.getBlockState())) return; // already looks natural
 
             // BUGFIX: see the matching comment in handleChunkData - never fill
             // a position with no real solid roof above it, even if it's below
@@ -1072,8 +1071,7 @@ public final class ChunkListener implements PacketListener {
                 }
 
                 WrappedBlockState state = WrappedBlockState.getByGlobalId(block.getBlockId());
-                StateType t = state != null ? state.getType() : StateTypes.AIR;
-                if (SmartFillEngine.isSafeTerrain(t)) continue; // already looks natural
+                if (SmartFillEngine.isSafeTerrain(state)) continue; // already looks natural
 
                 // BUGFIX: see the matching comment in handleChunkData - never
                 // fill a position with no real solid roof above it.

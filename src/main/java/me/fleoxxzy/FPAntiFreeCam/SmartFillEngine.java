@@ -48,10 +48,10 @@ public final class SmartFillEngine {
         s.add(StateTypes.DIRT);
         s.add(StateTypes.GRAVEL);
         s.add(StateTypes.COARSE_DIRT);
-        s.add(StateTypes.CALCITE);
-        s.add(StateTypes.SMOOTH_BASALT);
-        s.add(StateTypes.COBBLESTONE);
-        s.add(StateTypes.COBBLED_DEEPSLATE);
+        // NEW (1.5.4): calcite and smooth basalt (geode shells), cobblestone
+        // and cobbled deepslate (placed back by players) are what chunk
+        // finders look for, so they are masked in hidden areas and never
+        // used as fill.
         s.add(StateTypes.SANDSTONE);
         s.add(StateTypes.RED_SANDSTONE);
         s.add(StateTypes.TERRACOTTA);
@@ -102,8 +102,8 @@ public final class SmartFillEngine {
     private static final Set<StateType> NATURAL_COVER_TYPES;
     static {
         Set<StateType> s = new HashSet<>(TERRAIN_TYPES);
-        s.remove(StateTypes.COBBLESTONE);
-        s.remove(StateTypes.COBBLED_DEEPSLATE);
+        s.add(StateTypes.CALCITE);
+        s.add(StateTypes.SMOOTH_BASALT);
         s.remove(StateTypes.PACKED_MUD);
         s.remove(StateTypes.NETHERRACK);
         s.remove(StateTypes.BLACKSTONE);
@@ -168,6 +168,42 @@ public final class SmartFillEngine {
         if (type == null) return false; // null reads as air -> maskable
         return TERRAIN_TYPES.contains(type) || SURFACE_ONLY_SAFE_TYPES.contains(type)
                 || NEVER_MASK_EXTRA.contains(type);
+    }
+
+    /**
+     * NEW (1.5.4): same as isSafeTerrain, but rotated deepslate (axis x or z)
+     * is maskable. Worldgen only places deepslate[axis=y], so any other axis
+     * was placed by a player, which chunk finders flag.
+     */
+    public static boolean isSafeTerrain(WrappedBlockState state) {
+        if (state == null) return false;
+        StateType type = state.getType();
+        if (!isSafeTerrain(type)) return false;
+        return type != StateTypes.DEEPSLATE || !isRotatedDeepslate(state.getGlobalId());
+    }
+
+    private static volatile int deepslateUpId = Integer.MIN_VALUE;
+
+    /** True for a deepslate global id other than deepslate[axis=y]. */
+    static boolean isRotatedDeepslate(int globalId) {
+        int up = deepslateUpId;
+        if (up == Integer.MIN_VALUE) {
+            try {
+                WrappedBlockState s = WrappedBlockState.getByString("minecraft:deepslate[axis=y]");
+                up = s != null ? s.getGlobalId() : -1;
+            } catch (Exception e) {
+                up = -1;
+            }
+            deepslateUpId = up;
+        }
+        return up >= 0 && globalId != up;
+    }
+
+    /** NEW (1.5.4): sampler check, keeps rotated deepslate out of the fill. */
+    private static boolean isSampleable(WrappedBlockState state) {
+        StateType type = state != null ? state.getType() : null;
+        if (type == null || !TERRAIN_TYPES.contains(type)) return false;
+        return type != StateTypes.DEEPSLATE || !isRotatedDeepslate(state.getGlobalId());
     }
 
     /**
@@ -909,8 +945,7 @@ public final class SmartFillEngine {
                                 Boolean known = sampleable.get(id);
                                 if (known == null) {
                                     WrappedBlockState state = section.get(lx, ly, lz);
-                                    StateType type = state != null ? state.getType() : null;
-                                    known = type != null && TERRAIN_TYPES.contains(type)
+                                    known = isSampleable(state)
                                             && !(excludeOres && xray.isAnyHiddenOre(id));
                                     if (known) idToState.putIfAbsent(id, state);
                                     sampleable.put(id, known);
@@ -1016,8 +1051,7 @@ public final class SmartFillEngine {
                                 if (known == null) {
                                     known = 0;
                                     WrappedBlockState st = section.get(lx, ly, lz);
-                                    StateType type = st != null ? st.getType() : null;
-                                    if (type != null && TERRAIN_TYPES.contains(type)
+                                    if (isSampleable(st)
                                             && (xray == null || !xray.isAnyHiddenOre(id))
                                             && states.size() < 127) {
                                         states.add(st);
