@@ -602,6 +602,11 @@ public final class AntiXrayEngine {
      * player. Returns true if any block was changed (caller re-encodes).
      */
     public boolean processChunk(Player player, BaseChunk[] sections, int cx, int cz) {
+        return processChunk(player, sections, cx, cz, null);
+    }
+
+    /** NEW (1.5.4): same, and flags each section it changed in dirty (may be null). */
+    public boolean processChunk(Player player, BaseChunk[] sections, int cx, int cz, boolean[] dirty) {
         UUID uuid = player.getUniqueId();
         long ck = columnKey(cx, cz);
         if (!isActiveFor(player)) {
@@ -673,6 +678,7 @@ public final class AntiXrayEngine {
                         try {
                             section.set(lx, ly, lz, fakeId);
                             masked++;
+                            if (dirty != null && si < dirty.length) dirty[si] = true;
                         } catch (Exception ignored) {}
                     }
                 }

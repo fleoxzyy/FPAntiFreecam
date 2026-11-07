@@ -9,6 +9,16 @@ import com.github.retrooper.packetevents.protocol.world.chunk.BaseChunk;
 import com.github.retrooper.packetevents.protocol.world.chunk.Column;
 import com.github.retrooper.packetevents.protocol.world.chunk.LightData;
 import com.github.retrooper.packetevents.protocol.world.chunk.TileEntity;
+import com.github.retrooper.packetevents.protocol.world.chunk.impl.v_1_18.Chunk_v1_18;
+import com.github.retrooper.packetevents.protocol.world.chunk.palette.DataPalette;
+import com.github.retrooper.packetevents.protocol.world.chunk.palette.GlobalPalette;
+import com.github.retrooper.packetevents.protocol.world.chunk.palette.ListPalette;
+import com.github.retrooper.packetevents.protocol.world.chunk.palette.MapPalette;
+import com.github.retrooper.packetevents.protocol.world.chunk.palette.Palette;
+import com.github.retrooper.packetevents.protocol.world.chunk.palette.PaletteType;
+import com.github.retrooper.packetevents.protocol.world.chunk.palette.SingletonPalette;
+import com.github.retrooper.packetevents.protocol.world.chunk.storage.BaseStorage;
+import com.github.retrooper.packetevents.protocol.world.chunk.storage.BitStorage;
 import com.github.retrooper.packetevents.protocol.world.states.WrappedBlockState;
 import com.github.retrooper.packetevents.protocol.world.states.type.StateType;
 import com.github.retrooper.packetevents.protocol.world.states.type.StateTypes;
@@ -464,7 +474,9 @@ public final class ChunkListener implements PacketListener {
                 Column column = wrapper.getColumn();
                 BaseChunk[] sections = column != null ? column.getChunks() : null;
                 if (sections == null) return;
-                if (xray.processChunk(player, sections, column.getX(), column.getZ())) {
+                boolean[] dirty = new boolean[sections.length];
+                if (xray.processChunk(player, sections, column.getX(), column.getZ(), dirty)) {
+                    normalizeSections(sections, dirty);
                     stripXrayTileEntities(column, player, xray);
                     event.markForReEncode(true);
                 }
@@ -591,6 +603,7 @@ public final class ChunkListener implements PacketListener {
 
             boolean modified      = false;
             long    replacedCount = 0;
+            boolean[] dirty       = new boolean[sections.length]; // NEW (1.5.4): palette pass
 
             for (int si = 0; si < sections.length; si++) {
                 BaseChunk section = sections[si];
@@ -612,6 +625,7 @@ public final class ChunkListener implements PacketListener {
                                     section.set(lx, ly, lz, replacement);
                                     replacedCount++;
                                     modified = true;
+                                    dirty[si] = true;
                                 }
                             } catch (Exception ignored) {}
                         }
@@ -624,6 +638,7 @@ public final class ChunkListener implements PacketListener {
             }
 
             if (modified) {
+                normalizeSections(sections, dirty);
                 try { wrapper.setIgnoreOldData(true); } catch (Exception ignored) {}
                 event.markForReEncode(true);
                 plugin.incrementChunksModified();
@@ -798,6 +813,9 @@ public final class ChunkListener implements PacketListener {
         recordMaskedChunk(playerId, chunkX, chunkZ, maskedBits, minY >> 4, subMasks);
 
         if (modified) {
+            boolean[] dirty = new boolean[sections.length];
+            for (int si = 0; si < sections.length; si++) dirty[si] = replacedBits[si] != null;
+            normalizeSections(sections, dirty);
             try {
                 if (darkenReplaced(wrapper.getLightData(), replacedBits)) {
                     plugin.dbg("CHUNK_DATA light cleared at filled blocks for " + player.getName());
@@ -812,6 +830,89 @@ public final class ChunkListener implements PacketListener {
             plugin.dbg("CHUNK_DATA modified for " + player.getName()
                     + " (" + replacedCount + " blocks, smart-fill, tile entities stripped)");
         }
+    }
+
+    // ── Palette (NEW 1.5.4) ───────────────────────────────────────────────
+
+    /**
+     * NEW (1.5.4): palette exploit. Trouser-Streak NewerNewChunks and Glazed
+     * read a section's palette, not just its blocks. PacketEvents only ever
+     * appends to it, so after the fill the palette still lists the real
+     * blocks (diamond ore, chests, a base) with nothing using them, and the
+     * fill block sits at the end. Changed sections are rebuilt the way vanilla
+     * saves them: palette in first-use order, no unused entries. The non-air
+     * count is redone too, since fill over cave_air left it too low, and a
+     * count of 0 makes the client skip the section.
+     *
+     * @param dirty sections to check (null = all)
+     */
+    private static void normalizeSections(BaseChunk[] sections, boolean[] dirty) {
+        for (int si = 0; si < sections.length; si++) {
+            if (dirty != null && (si >= dirty.length || !dirty[si])) continue;
+            try {
+                normalizeSection(sections[si]);
+            } catch (Exception ignored) {} // leave the section as it was
+        }
+    }
+
+    private static void normalizeSection(BaseChunk section) {
+        if (!(section instanceof Chunk_v1_18 s)) return;
+        DataPalette dp = s.getChunkData();
+        Palette p = dp.palette;
+        BaseStorage st = dp.storage;
+        if (st == null || p instanceof SingletonPalette || p instanceof GlobalPalette) return;
+        int size = p.size();
+        if (size <= 0 || size > 256) return;
+
+        int len = PaletteType.CHUNK.getStorageSize();
+        int[] remap = new int[size];
+        Arrays.fill(remap, -1);
+        int[] states = new int[size];
+        int[] counts = new int[size];
+        int n = 0;
+        boolean clean = true;
+        for (int i = 0; i < len; i++) {
+            int id = st.get(i);
+            if (id < 0 || id >= size) return; // corrupt, don't touch it
+            int to = remap[id];
+            if (to < 0) {
+                int state = p.idToState(id);
+                to = -1;
+                for (int k = 0; k < n; k++) if (states[k] == state) { to = k; break; }
+                if (to < 0) { to = n; states[n++] = state; }
+                if (to != id) clean = false;
+                remap[id] = to;
+            }
+            counts[to]++;
+        }
+        if (n != size) clean = false;
+
+        int nonAir = 0;
+        for (int k = 0; k < n; k++) {
+            if (!WrappedBlockState.getByGlobalId(states[k], false).getType().isAir()) nonAir += counts[k];
+        }
+        if (s.getBlockCount() != nonAir) s.setBlockCount(nonAir);
+        if (clean) return;
+
+        if (n == 1) {
+            dp.palette = new SingletonPalette(states[0]);
+            dp.storage = null;
+            return;
+        }
+        int bits = 32 - Integer.numberOfLeadingZeros(n - 1);
+        Palette np;
+        if (bits <= PaletteType.CHUNK.getMaxBitsPerEntryForList()) {
+            bits = PaletteType.CHUNK.getMaxBitsPerEntryForList();
+            np = new ListPalette(bits, Arrays.copyOf(states, n));
+        } else {
+            MapPalette mp = new MapPalette(bits);
+            for (int k = 0; k < n; k++) mp.stateToId(states[k]);
+            np = mp;
+        }
+        BitStorage ns = new BitStorage(bits, len);
+        for (int i = 0; i < len; i++) ns.set(i, remap[st.get(i)]);
+        dp.palette = np;
+        dp.storage = ns;
     }
 
     // ── Light (NEW 1.5.4) ─────────────────────────────────────────────────
