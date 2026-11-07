@@ -7,6 +7,7 @@ import com.github.retrooper.packetevents.protocol.packettype.PacketType;
 import com.github.retrooper.packetevents.protocol.player.User;
 import com.github.retrooper.packetevents.protocol.world.chunk.BaseChunk;
 import com.github.retrooper.packetevents.protocol.world.chunk.Column;
+import com.github.retrooper.packetevents.protocol.world.chunk.LightData;
 import com.github.retrooper.packetevents.protocol.world.chunk.TileEntity;
 import com.github.retrooper.packetevents.protocol.world.states.WrappedBlockState;
 import com.github.retrooper.packetevents.protocol.world.states.type.StateType;
@@ -46,6 +47,7 @@ import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerPa
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSoundEffect;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSpawnEntity;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerUnloadChunk;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerUpdateLight;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.entity.Entity;
@@ -54,6 +56,7 @@ import org.bukkit.entity.Player;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -197,6 +200,7 @@ public final class ChunkListener implements PacketListener {
         s.add(PacketType.Play.Server.CHUNK_DATA);
         s.add(PacketType.Play.Server.BLOCK_CHANGE);
         s.add(PacketType.Play.Server.MULTI_BLOCK_CHANGE);
+        s.add(PacketType.Play.Server.UPDATE_LIGHT); // NEW (1.5.4): light exploit
         s.add(PacketType.Play.Server.BLOCK_ENTITY_DATA);
         s.add(PacketType.Play.Server.BLOCK_ACTION);
         s.add(PacketType.Play.Server.EFFECT);
@@ -398,6 +402,8 @@ public final class ChunkListener implements PacketListener {
             }
         } else if (type == PacketType.Play.Server.BLOCK_ENTITY_DATA) {
             handleBlockEntityData(event, player);
+        } else if (type == PacketType.Play.Server.UPDATE_LIGHT) {
+            handleUpdateLight(event, player);
         } else if (type == PacketType.Play.Server.BLOCK_ACTION) {
             handleBlockAction(event, player);
         } else if (type == PacketType.Play.Server.EFFECT) {
@@ -666,6 +672,8 @@ public final class ChunkListener implements PacketListener {
         long    replacedCount = 0;
         long    maskedBits    = 0;
         long[]  subMasks      = new long[Math.min(sections.length, 64)];
+        // NEW (1.5.4): which blocks were replaced, per section (4096 bits), for the light pass.
+        long[][] replacedBits = new long[sections.length][];
 
         for (int si = 0; si < sections.length; si++) {
             BaseChunk section = sections[si];
@@ -741,6 +749,7 @@ public final class ChunkListener implements PacketListener {
                                         replacedCount++;
                             modified = true;
                             subMasks[Math.min(si, 63)] |= 1L << ((lx >> 2) | (ly >> 2) << 2 | (lz >> 2) << 4);
+                            markReplaced(replacedBits, si, lx, ly, lz);
                         }
                 continue;
                 }
@@ -772,6 +781,7 @@ public final class ChunkListener implements PacketListener {
                             replacedCount++;
                             modified = true;
                             subMasks[Math.min(si, 63)] |= 1L << ((lx >> 2) | (ly >> 2) << 2 | (lz >> 2) << 4);
+                            markReplaced(replacedBits, si, lx, ly, lz);
                         } catch (Exception ignored) {}
                     }
                 }
@@ -788,12 +798,144 @@ public final class ChunkListener implements PacketListener {
         recordMaskedChunk(playerId, chunkX, chunkZ, maskedBits, minY >> 4, subMasks);
 
         if (modified) {
+            try {
+                if (darkenReplaced(wrapper.getLightData(), replacedBits)) {
+                    plugin.dbg("CHUNK_DATA light cleared at filled blocks for " + player.getName());
+                }
+            } catch (Exception e) {
+                plugin.dbg("CHUNK_DATA light error: " + e.getMessage());
+            }
             try { wrapper.setIgnoreOldData(true); } catch (Exception ignored) {}
             event.markForReEncode(true);
             plugin.incrementChunksModified();
             plugin.addBlocksReplaced(replacedCount);
             plugin.dbg("CHUNK_DATA modified for " + player.getName()
                     + " (" + replacedCount + " blocks, smart-fill, tile entities stripped)");
+        }
+    }
+
+    // ── Light (NEW 1.5.4) ─────────────────────────────────────────────────
+
+    private static void markReplaced(long[][] bits, int si, int lx, int ly, int lz) {
+        long[] b = bits[si];
+        if (b == null) b = bits[si] = new long[64];
+        int i = (ly << 8) | (lz << 4) | lx;
+        b[i >> 6] |= 1L << (i & 63);
+    }
+
+    /**
+     * NEW (1.5.4): light exploit. Chunk Finder clients (Autism/Anubis "Dog+",
+     * Krypton, Glazed) read block light the server sends with each chunk: a
+     * torch-lit base or a lava pocket gives itself away under fake stone. Both
+     * light values are cleared at every block Smart Fill replaced, so the fill
+     * is as dark as real rock. Light arrays have one extra section below the
+     * world, so section si is light index si + 1, and arrays only exist for
+     * set mask bits (packed in order).
+     */
+    private static boolean darkenReplaced(LightData light, long[][] replacedBits) {
+        if (light == null) return false;
+        boolean changed = darken(light.getBlockLightMask(), light.getBlockLightArray(), replacedBits);
+        if (darken(light.getSkyLightMask(), light.getSkyLightArray(), replacedBits)) changed = true;
+        return changed;
+    }
+
+    private static boolean darken(BitSet mask, byte[][] arrays, long[][] replacedBits) {
+        if (mask == null || arrays == null) return false;
+        boolean changed = false;
+        int slot = 0;
+        for (int li = mask.nextSetBit(0); li >= 0 && slot < arrays.length; li = mask.nextSetBit(li + 1), slot++) {
+            int si = li - 1;
+            if (si < 0 || si >= replacedBits.length || replacedBits[si] == null) continue;
+            byte[] nib = arrays[slot];
+            if (nib == null || nib.length < 2048) continue;
+            long[] b = replacedBits[si];
+            byte[] out = null;
+            for (int w = 0; w < 64; w++) {
+                long word = b[w];
+                while (word != 0) {
+                    int i = (w << 6) | Long.numberOfTrailingZeros(word);
+                    word &= word - 1;
+                    byte cur = (out != null ? out : nib)[i >> 1];
+                    byte nv = (byte) ((i & 1) == 0 ? cur & 0xF0 : cur & 0x0F);
+                    if (nv == cur) continue;
+                    if (out == null) out = nib.clone(); // the array may be shared with other viewers
+                    out[i >> 1] = nv;
+                }
+            }
+            if (out != null) {
+                arrays[slot] = out;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /**
+     * NEW (1.5.4): light updates (torches, lava, glowstone placed or broken)
+     * reach the client on their own, after the block change itself was dropped.
+     * Block light in hidden, unrevealed 4×4×4 cells of masked chunks is
+     * cleared, the same way the chunk send does it.
+     */
+    private void handleUpdateLight(PacketSendEvent event, Player player) {
+        plugin.incrementPacketsProcessed();
+        try {
+            if (!plugin.isSmartFillEnabledFor(player) || !plugin.isSmartFillActiveFor(player)) return;
+            WrapperPlayServerUpdateLight wrapper = new WrapperPlayServerUpdateLight(event);
+            Map<Long, MaskedChunk> m = maskedChunks.get(player.getUniqueId());
+            MaskedChunk mc = m != null ? m.get(columnKey(wrapper.getX(), wrapper.getZ())) : null;
+            if (mc == null || mc.sections == 0) return;
+            LightData light = wrapper.getLightData();
+            if (light == null) return;
+            BitSet mask = light.getBlockLightMask();
+            byte[][] arrays = light.getBlockLightArray();
+            if (mask == null || arrays == null) return;
+
+            SmartFillReveal reveal = plugin.getSmartFillReveal();
+            org.bukkit.Location pLoc = player.getLocation();
+            int pBX = pLoc.getBlockX(), pBY = pLoc.getBlockY(), pBZ = pLoc.getBlockZ();
+            UUID playerId = player.getUniqueId();
+            int baseX = wrapper.getX() << 4, baseZ = wrapper.getZ() << 4;
+            boolean changed = false;
+            int slot = 0;
+            for (int li = mask.nextSetBit(0); li >= 0 && slot < arrays.length; li = mask.nextSetBit(li + 1), slot++) {
+                int idx = li - 1;
+                if (idx < 0 || idx >= mc.subMasks.length) continue;
+                long cells = mc.subMasks[idx];
+                if (cells == 0) continue;
+                byte[] nib = arrays[slot];
+                if (nib == null || nib.length < 2048) continue;
+                int baseY = (mc.minSection + idx) << 4;
+                byte[] out = null;
+                for (long c = cells; c != 0; c &= c - 1) {
+                    int bit = Long.numberOfTrailingZeros(c);
+                    int sx = bit & 3, sy = (bit >> 2) & 3, sz = (bit >> 4) & 3;
+                    if (reveal != null && reveal.isSubCellRevealed(playerId,
+                            (baseX >> 2) + sx, (baseY >> 2) + sy, (baseZ >> 2) + sz, pBX, pBY, pBZ)) continue;
+                    for (int y = sy << 2; y < (sy << 2) + 4; y++) {
+                        for (int z = sz << 2; z < (sz << 2) + 4; z++) {
+                            for (int x = sx << 2; x < (sx << 2) + 4; x++) {
+                                int i = (y << 8) | (z << 4) | x;
+                                byte cur = (out != null ? out : nib)[i >> 1];
+                                byte nv = (byte) ((i & 1) == 0 ? cur & 0xF0 : cur & 0x0F);
+                                if (nv == cur) continue;
+                                if (out == null) out = nib.clone();
+                                out[i >> 1] = nv;
+                            }
+                        }
+                    }
+                }
+                if (out != null) {
+                    arrays[slot] = out;
+                    changed = true;
+                }
+            }
+            if (changed) {
+                event.markForReEncode(true);
+                plugin.dbg("UPDATE_LIGHT cleared hidden block light in " + wrapper.getX() + "," + wrapper.getZ()
+                        + " for " + player.getName());
+            }
+        } catch (Exception e) {
+            plugin.dbg("UPDATE_LIGHT error: " + e.getMessage());
         }
     }
 
