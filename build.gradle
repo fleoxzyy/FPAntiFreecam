@@ -5,7 +5,7 @@ plugins {
 }
 
 group = 'me.fleoxxzy'
-version = '1.5.31'
+version = '1.5.4-' + providers.exec { commandLine 'git', 'rev-parse', '--short', 'HEAD'; ignoreExitValue = true }.standardOutput.asText.getOrElse('').trim().with { it ?: 'nogit' }
 
 repositories {
     mavenCentral()

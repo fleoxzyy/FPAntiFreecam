@@ -136,8 +136,13 @@ public final class UpdateChecker implements Listener {
         player.sendMessage(ChatUtil.color("&8&m──────────────────────────────────────────────"));
     }
 
-    /** Strips a leading 'v' so "v1.2.0" and "1.2.0" compare equal. */
+    /**
+     * Strips a leading 'v' so "v1.2.0" and "1.2.0" compare equal.
+     * IMPROVEMENT (1.5.4): also strips the "-githash" build suffix, so
+     * "1.5.4-1a2b3c4" counts as up to date against "1.5.4".
+     */
     private static String normalise(String version) {
-        return version == null ? "" : version.trim().replaceAll("(?i)^v", "");
+        return version == null ? "" : version.trim().replaceAll("(?i)^v", "")
+                .replaceAll("(?i)-(?:[0-9a-f]{7,40}|nogit)$", "");
     }
 }
