@@ -53,6 +53,7 @@ import org.bukkit.entity.Player;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -465,6 +466,7 @@ public final class ChunkListener implements PacketListener {
                 int before = new WrapperPlayServerBlockChange(event).getBlockId();
                 freecamDone = true; // set first: the handler itself must not run twice
                 if (freecamPass) handleBlockChange(event, player);
+                if (event.isCancelled()) return; // NEW (1.5.4): dropped as hidden
                 WrapperPlayServerBlockChange wrapper = new WrapperPlayServerBlockChange(event);
                 Vector3i pos = wrapper.getBlockPosition();
                 if (pos == null) return;
@@ -484,8 +486,22 @@ public final class ChunkListener implements PacketListener {
                 }
                 freecamDone = true; // set first: the handler itself must not run twice
                 if (freecamPass) handleMultiBlockChange(event, player);
+                if (event.isCancelled()) return; // NEW (1.5.4): every entry was hidden
                 WrapperPlayServerMultiBlockChange wrapper = new WrapperPlayServerMultiBlockChange(event);
-                if (xray.processMultiBlockChange(player, wrapper.getBlocks(), before)) {
+                WrapperPlayServerMultiBlockChange.EncodedBlock[] post = wrapper.getBlocks();
+                // NEW (1.5.4): the freecam pass may drop hidden entries, so line
+                // the original ids up again by entry instead of by index.
+                if (pre != null && before != null && post != null && post.length != pre.length) {
+                    java.util.IdentityHashMap<Object, Integer> at = new java.util.IdentityHashMap<>(pre.length * 2);
+                    for (int i = 0; i < pre.length; i++) if (pre[i] != null) at.put(pre[i], before[i]);
+                    int[] kept = new int[post.length];
+                    for (int i = 0; i < post.length; i++) {
+                        Integer id = post[i] != null ? at.get(post[i]) : null;
+                        kept[i] = id != null ? id : (post[i] != null ? post[i].getBlockId() : 0);
+                    }
+                    before = kept;
+                }
+                if (xray.processMultiBlockChange(player, post, before)) {
                     event.markForReEncode(true);
                 }
             }
@@ -916,21 +932,9 @@ public final class ChunkListener implements PacketListener {
                         return; // player is physically here - keep the real block
                     }
                 }
-                // IMPROVEMENT: adaptive fill instead of flat air - see the
-                // matching comment in handleChunkData.
-                WrappedBlockState hardFloorFill = palette != null
-                        ? smartFill.selectState(palette, pos.getX(), pos.getY(), pos.getZ())
-                        : smartFill.getDefaultState(worldName, pos.getY());
-                if (wrapper.getBlockState().getGlobalId() != hardFloorFill.getGlobalId()) {
-                    wrapper.setBlockState(hardFloorFill);
-                    event.markForReEncode(true);
-                    plugin.addBlocksReplaced(1);
-                    plugin.dbg("BLOCK_CHANGE (hard floor) at " + pos + " for " + player.getName());
-                }
+                dropHiddenBlockChange(event, player, pos, "hard floor");
                 return;
             }
-
-            if (SmartFillEngine.isSafeTerrain(wrapper.getBlockState())) return; // already looks natural
 
             // BUGFIX: see the matching comment in handleChunkData - never fill
             // a position with no real solid roof above it, even if it's below
@@ -946,16 +950,26 @@ public final class ChunkListener implements PacketListener {
                 }
             }
 
-            WrappedBlockState fill = palette != null
-                    ? smartFill.selectState(palette, pos.getX(), pos.getY(), pos.getZ())
-                    : smartFill.getDefaultState(worldName, pos.getY());
-            wrapper.setBlockState(fill);
-            event.markForReEncode(true);
-            plugin.addBlocksReplaced(1);
-            plugin.dbg("BLOCK_CHANGE smart-fill at " + pos + " for " + player.getName());
+            dropHiddenBlockChange(event, player, pos, "smart-fill");
         } catch (Exception e) {
             plugin.dbg("BLOCK_CHANGE error: " + e.getMessage());
         }
+    }
+
+    /**
+     * NEW (1.5.4): block update exploit. Chunk Finder clients (Trouser-Streak
+     * NewerNewChunks, Krypton, Glazed) flag chunks that get block updates
+     * underground: flowing liquid, growing amethyst, a base being built. Even
+     * a faked fill block is still an update, so a hidden, unrevealed update is
+     * dropped instead. The cell is marked so the real block is re-sent once
+     * the player can actually see the spot.
+     */
+    private void dropHiddenBlockChange(PacketSendEvent event, Player player, Vector3i pos, String why) {
+        event.setCancelled(true);
+        markMaskedCell(player.getUniqueId(), pos.getX(), pos.getY(), pos.getZ(),
+                player.getWorld().getMinHeight() >> 4);
+        plugin.addBlocksReplaced(1);
+        plugin.dbg("BLOCK_CHANGE dropped (" + why + ") at " + pos + " for " + player.getName());
     }
 
     // ── MULTI_BLOCK_CHANGE ────────────────────────────────────────────────
@@ -1020,6 +1034,9 @@ public final class ChunkListener implements PacketListener {
             final int revealChunkTop = Math.max(chunkTop,
                     palette != null && palette.revealTop != null ? palette.maxReveal : ceilingY);
             boolean coverEdit = false;
+            // NEW (1.5.4): hidden entries are dropped, not faked - see dropHiddenBlockChange.
+            int minSection = player.getWorld().getMinHeight() >> 4;
+            List<WrapperPlayServerMultiBlockChange.EncodedBlock> kept = null;
 
             // NEW: same as BLOCK_CHANGE: air arriving from any cause re-runs
             // the fill. One air block per packet is enough.
@@ -1034,57 +1051,38 @@ public final class ChunkListener implements PacketListener {
                 }
             }
 
-            for (WrapperPlayServerMultiBlockChange.EncodedBlock block : blocks) {
+            for (int i = 0; i < blocks.length; i++) {
+                WrapperPlayServerMultiBlockChange.EncodedBlock block = blocks[i];
                 if (block == null) continue;
                 if (palette != null && palette.coverTop != null && !coverEdit
                         && SmartFillEngine.coverMayChange(palette, block.getX() & 15, block.getZ() & 15,
                                 block.getY(), ceilingY)) {
                     coverEdit = true;
                 }
-                if (block.getY() > SmartFillEngine.maskTop(palette, block.getX() & 15, block.getZ() & 15, ceilingY)) continue;
-
-                // IMPROVEMENT: shallow surface structures (PvP arenas,
-                // crystal holes, player-built rooms) are exempted entirely -
-                // see the matching comment in handleChunkData.
-                if (smartFill.isExemptSurfaceStructure(palette, block.getX() & 15, block.getZ() & 15, block.getY())) continue;
-
-                if (block.getY() <= hardFloorY) {
-                    // BUGFIX: see the matching comment in handleChunkData -
-                    // apply the same proximity/look reveal to the hard floor
-                    // so a player genuinely playing at/below void-y sees
-                    // their own real surroundings instead of forced flat air.
-                    if (reveal != null && reveal.isAirRevealed(
-                            block.getX(), block.getY(), block.getZ(), playerId, pBX, pBY, pBZ)) {
-                        continue; // player is physically here - keep the real block
-                    }
-                    // IMPROVEMENT: adaptive fill instead of flat air - see the
-                    // matching comment in handleChunkData.
-                    int hardFloorFillId = palette != null
-                            ? smartFill.selectId(palette, block.getX(), block.getY(), block.getZ())
-                            : smartFill.getDefaultState(worldName, block.getY()).getGlobalId();
-                    if (block.getBlockId() != hardFloorFillId) {
-                        block.setBlockId(hardFloorFillId);
-                        replacedCount++;
-                        modified = true;
-                    }
+                boolean keep = true;
+                if (block.getY() <= SmartFillEngine.maskTop(palette, block.getX() & 15, block.getZ() & 15, ceilingY)
+                        // IMPROVEMENT: shallow surface structures (PvP arenas,
+                        // crystal holes, player-built rooms) are exempted entirely -
+                        // see the matching comment in handleChunkData.
+                        && !smartFill.isExemptSurfaceStructure(palette, block.getX() & 15, block.getZ() & 15, block.getY())
+                        // BUGFIX: see the matching comment in handleChunkData - never
+                        // hide a position with no real solid roof above it (the hard
+                        // floor ignores this, same as before).
+                        && (block.getY() <= hardFloorY
+                            || !smartFill.isOpenToSky(palette, block.getX() & 15, block.getZ() & 15, block.getY()))
+                        && (reveal == null || !reveal.isAirRevealed(
+                            block.getX(), block.getY(), block.getZ(), playerId, pBX, pBY, pBZ))) {
+                    keep = false;
+                }
+                if (keep) {
+                    if (kept != null) kept.add(block);
                     continue;
                 }
-
-                WrappedBlockState state = WrappedBlockState.getByGlobalId(block.getBlockId());
-                if (SmartFillEngine.isSafeTerrain(state)) continue; // already looks natural
-
-                // BUGFIX: see the matching comment in handleChunkData - never
-                // fill a position with no real solid roof above it.
-                if (smartFill.isOpenToSky(palette, block.getX() & 15, block.getZ() & 15, block.getY())) continue;
-
-                if (reveal != null && reveal.isAirRevealed(
-                        block.getX(), block.getY(), block.getZ(), playerId, pBX, pBY, pBZ)) {
-                    continue; // near/looked-at -> send the real block
+                if (kept == null) {
+                    kept = new ArrayList<>(blocks.length);
+                    for (int j = 0; j < i; j++) if (blocks[j] != null) kept.add(blocks[j]);
                 }
-                int fillId = palette != null
-                        ? smartFill.selectId(palette, block.getX(), block.getY(), block.getZ())
-                        : smartFill.getDefaultState(worldName, block.getY()).getGlobalId();
-                block.setBlockId(fillId);
+                markMaskedCell(playerId, block.getX(), block.getY(), block.getZ(), minSection);
                 replacedCount++;
                 modified = true;
             }
@@ -1098,10 +1096,15 @@ public final class ChunkListener implements PacketListener {
             }
 
             if (modified) {
-                event.markForReEncode(true);
                 plugin.addBlocksReplaced(replacedCount);
-                plugin.dbg("MULTI_BLOCK_CHANGE modified for " + player.getName()
-                        + " (" + replacedCount + " blocks, smart-fill)");
+                if (kept == null || kept.isEmpty()) {
+                    event.setCancelled(true);
+                } else {
+                    wrapper.setBlocks(kept.toArray(new WrapperPlayServerMultiBlockChange.EncodedBlock[0]));
+                    event.markForReEncode(true);
+                }
+                plugin.dbg("MULTI_BLOCK_CHANGE dropped " + replacedCount + " hidden blocks for "
+                        + player.getName() + (event.isCancelled() ? " (whole packet)" : ""));
             }
         } catch (Exception e) {
             plugin.dbg("MULTI_BLOCK_CHANGE error: " + e.getMessage());
@@ -1555,6 +1558,32 @@ public final class ChunkListener implements PacketListener {
     private void forgetChunk(UUID playerId, int cx, int cz) {
         Map<Long, MaskedChunk> m = maskedChunks.get(playerId);
         if (m != null) m.remove(columnKey(cx, cz));
+    }
+
+    /**
+     * NEW (1.5.4): a block update at a hidden spot was dropped, so the client
+     * may be out of date there. Marking its 4×4×4 cell as masked lets the
+     * proximity refresh re-send the chunk once the spot is revealed, so no
+     * ghost blocks are left. Records are replaced, never edited in place.
+     */
+    private void markMaskedCell(UUID playerId, int bx, int by, int bz, int minSection) {
+        int idx = Math.min(Math.max((by >> 4) - minSection, 0), 63);
+        int bit = ((bx & 15) >> 2) | ((by & 15) >> 2) << 2 | ((bz & 15) >> 2) << 4;
+        Map<Long, MaskedChunk> m = maskedChunks.computeIfAbsent(playerId, k -> new ConcurrentHashMap<>());
+        long key = columnKey(bx >> 4, bz >> 4);
+        MaskedChunk old = m.get(key);
+        long[] subs;
+        long sections;
+        if (old != null && old.minSection == minSection) {
+            if ((old.subMasks.length > idx) && (old.subMasks[idx] & (1L << bit)) != 0) return;
+            subs = Arrays.copyOf(old.subMasks, Math.max(old.subMasks.length, idx + 1));
+            sections = old.sections;
+        } else {
+            subs = new long[idx + 1];
+            sections = 0;
+        }
+        subs[idx] |= 1L << bit;
+        m.put(key, new MaskedChunk(sections | (1L << idx), minSection, subs));
     }
 
     private void rememberFlatMasked(UUID playerId, int cx, int cz) {
