@@ -185,39 +185,18 @@ public final class UpdateChecker implements Listener {
         return dash < 0 ? version : version.substring(0, dash);
     }
 
-    /**
-     * Versions here read like decimals: 1.5.31 sits between 1.5.3 and 1.5.4.
-     * So the first part is compared as a number, the rest digit by digit.
-     */
+    /** Compares dotted versions part by part as numbers: 1.5.3.1 < 1.5.4 < 1.5.10. */
     private static int compareBase(String a, String b) {
         String[] pa = a.split("\\."), pb = b.split("\\.");
         for (int i = 0; i < Math.max(pa.length, pb.length); i++) {
-            String x = i < pa.length ? digits(pa[i]) : "0", y = i < pb.length ? digits(pb[i]) : "0";
-            int c;
-            if (i == 0) {
-                c = Integer.compare(num(x), num(y));
-            } else {
-                int len = Math.max(x.length(), y.length());
-                c = pad(x, len).compareTo(pad(y, len));
-            }
-            if (c != 0) return c;
+            int x = i < pa.length ? num(pa[i]) : 0, y = i < pb.length ? num(pb[i]) : 0;
+            if (x != y) return Integer.compare(x, y);
         }
         return 0;
     }
 
-    private static String digits(String s) {
-        String d = s.replaceAll("\\D.*$", "");
-        return d.isEmpty() ? "0" : d;
-    }
-
-    private static String pad(String s, int len) {
-        StringBuilder sb = new StringBuilder(s);
-        while (sb.length() < len) sb.append('0');
-        return sb.toString();
-    }
-
     private static int num(String s) {
-        try { return Integer.parseInt(s); } catch (NumberFormatException e) { return 0; }
+        try { return Integer.parseInt(s.replaceAll("\\D.*$", "")); } catch (NumberFormatException e) { return 0; }
     }
 
     /** Strips a leading 'v' so "v1.2.0" and "1.2.0" compare equal. */
