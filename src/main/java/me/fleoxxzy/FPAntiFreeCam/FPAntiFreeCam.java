@@ -261,6 +261,42 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private volatile int terrainRevealAllDepth = 6;
 
     /**
+     * NEW (terrain protection): what a sealed-in player is sent. No entry
+     * means the real terrain. Replaced as a whole, never changed, so Netty
+     * reads are safe.
+     */
+    static final class TerrainState {
+        final boolean near;   // the 3x3 chunks around (pcx, pcz) are real
+        final UUID worldId;
+        final int pcx, pcz;
+        final int floorY;     // everything above this is faked
+        TerrainState(boolean near, UUID worldId, int pcx, int pcz, int floorY) {
+            this.near = near; this.worldId = worldId; this.pcx = pcx; this.pcz = pcz; this.floorY = floorY;
+        }
+        boolean sameAs(TerrainState o) {
+            return o != null && near == o.near && worldId.equals(o.worldId) && floorY == o.floorY
+                    && (!near || (pcx == o.pcx && pcz == o.pcz));
+        }
+        boolean isReal(int cx, int cz) {
+            return near && Math.abs(cx - pcx) <= 1 && Math.abs(cz - pcz) <= 1;
+        }
+    }
+    private final Map<UUID, TerrainState> terrainStates = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> terrainSealedSince = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> terrainLeftAt = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> terrainVersions = new ConcurrentHashMap<>();
+    /** Sealed in this long before the surface is faked, so a brief gap closing doesn't reload everything. */
+    private static final long TERRAIN_SEAL_DELAY_MS = 500;
+    /** After the real surface came back, wait this long before faking it again. */
+    private static final long TERRAIN_REENTER_MS = 2000;
+    /** Blocks past a reveal depth before going back, so standing on the line doesn't flip it. */
+    private static final int TERRAIN_HYSTERESIS = 2;
+    /** Air the fill reached must stay this far under the fake floor. */
+    private static final int TERRAIN_FLOOR_GAP = 3;
+    /** A new floor is put this far above the reached air, so it isn't raised every block climbed. */
+    private static final int TERRAIN_FLOOR_MARGIN = 8;
+
+    /**
      * NEW: per-player last-checked-chunk tracking so Smart Fill can smoothly
      * refresh nearby chunks as a player walks toward (or descends into) a
      * previously camouflaged area, instead of the fake terrain only ever
@@ -1164,6 +1200,13 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             retryPendingRefresh(p);
             if (raycastEnabled) checkRaycastActivation(p);
             if (smartFillReveal != null) smartFillReveal.updateLosReveal(p);
+            try {
+                updateTerrainProtection(p);
+            } catch (Exception e) {
+                dbg("Terrain protection update failed for " + p.getName() + ": " + e.getMessage());
+            }
+        } else if (terrainStates.containsKey(p.getUniqueId())) {
+            clearTerrainProtection(p, true); // bypass gained or world no longer protected
         }
         if (entities && entityHider != null) {
             // Keeps fpantifreecam.bypass.entities current in every world
@@ -1413,6 +1456,134 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         } else if (paperScheduler != null) {
             paperScheduler.refreshColumns(player, columns);
         }
+    }
+
+    // ── Terrain protection (NEW) ──────────────────────────────────────────
+
+    /**
+     * NEW (terrain protection): picks what surface this player is sent and
+     * re-sends the chunks that changed. Player's thread, after the flood fill.
+     */
+    private void updateTerrainProtection(Player p) {
+        UUID id = p.getUniqueId();
+        TerrainState prev = terrainStates.get(id);
+        World world = p.getWorld();
+        if (smartFillReveal == null || !isTerrainProtectionWorld(world) || !isSmartFillActiveFor(p)) {
+            terrainSealedSince.remove(id);
+            if (prev != null) clearTerrainProtection(p, true);
+            return;
+        }
+        Location eye = p.getEyeLocation();
+        int ex = eye.getBlockX(), ey = eye.getBlockY(), ez = eye.getBlockZ();
+        int airTop = smartFillReveal.enclosedAirTop(id, world.getUID(), ex, ey, ez);
+        int depth;
+        try {
+            depth = world.getHighestBlockYAt(ex, ez) - ey;
+        } catch (Exception e) {
+            depth = Integer.MIN_VALUE;
+        }
+        int allDepth = terrainRevealAllDepth, nearDepth = terrainReveal3x3Depth;
+        boolean sealed = airTop != Integer.MIN_VALUE
+                && depth > allDepth + (prev == null ? TERRAIN_HYSTERESIS : 0);
+        long now = System.currentTimeMillis();
+        if (!sealed) {
+            terrainSealedSince.remove(id);
+            if (prev != null) clearTerrainProtection(p, true);
+            return;
+        }
+        if (prev == null || !prev.worldId.equals(world.getUID())) {
+            Long since = terrainSealedSince.putIfAbsent(id, now);
+            if (since == null || now - since < TERRAIN_SEAL_DELAY_MS) return;
+            if (now - terrainLeftAt.getOrDefault(id, 0L) < TERRAIN_REENTER_MS) return;
+            prev = null;
+        }
+
+        boolean near = depth <= nearDepth + (prev != null && prev.near ? TERRAIN_HYSTERESIS : 0);
+        int pcx = p.getLocation().getBlockX() >> 4, pcz = p.getLocation().getBlockZ() >> 4;
+        int floor = airTop + TERRAIN_FLOOR_GAP;
+        boolean raised = false;
+        if (prev != null && prev.floorY >= floor) {
+            floor = prev.floorY;
+        } else {
+            floor += TERRAIN_FLOOR_MARGIN;
+            raised = prev != null;
+        }
+        TerrainState next = new TerrainState(near, world.getUID(), pcx, pcz, floor);
+        if (next.sameAs(prev)) return;
+        terrainStates.put(id, next);
+        terrainVersions.merge(id, 1, Integer::sum);
+
+        if (prev == null) {
+            dbg("Terrain protection on for " + p.getName() + " (floor Y=" + floor + ", depth " + depth + ")");
+            refreshFullView(p, true);
+            return;
+        }
+        Set<Long> changed = new HashSet<>();
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                int ax = prev.pcx + dx, az = prev.pcz + dz, bx = pcx + dx, bz = pcz + dz;
+                if (prev.isReal(ax, az) != next.isReal(ax, az)) changed.add(((long) ax << 32) | (az & 0xFFFFFFFFL));
+                if (prev.isReal(bx, bz) != next.isReal(bx, bz)) changed.add(((long) bx << 32) | (bz & 0xFFFFFFFFL));
+            }
+        }
+        if (raised) {
+            // The client still has fake stone between the old and new floor
+            // right where the player is digging up; only nearby chunks matter.
+            int r = smartFillReveal.getRevealRadius() / 16 + 1;
+            for (int cx = pcx - r; cx <= pcx + r; cx++) {
+                for (int cz = pcz - r; cz <= pcz + r; cz++) {
+                    if (!next.isReal(cx, cz)) changed.add(((long) cx << 32) | (cz & 0xFFFFFFFFL));
+                }
+            }
+        }
+        if (!changed.isEmpty()) refreshColumns(p, changed);
+        dbg("Terrain protection " + (near ? "3x3" : "fake") + " for " + p.getName() + " (floor Y=" + floor
+                + ", " + changed.size() + " chunks re-sent)");
+    }
+
+    /** NEW (terrain protection): back to the real surface. Player's thread. */
+    private void clearTerrainProtection(Player p, boolean resend) {
+        UUID id = p.getUniqueId();
+        terrainSealedSince.remove(id);
+        if (terrainStates.remove(id) == null) return;
+        terrainVersions.merge(id, 1, Integer::sum);
+        terrainLeftAt.put(id, System.currentTimeMillis());
+        dbg("Terrain protection off for " + p.getName());
+        if (resend) refreshFullView(p, true);
+    }
+
+    /** NEW (terrain protection): forgets the state without a re-send (client dropped its chunks). Any thread. */
+    void forgetTerrainProtection(UUID id) {
+        terrainSealedSince.remove(id);
+        if (terrainStates.remove(id) != null) terrainVersions.merge(id, 1, Integer::sum);
+    }
+
+    /**
+     * NEW (terrain protection): blocks above this Y in chunk (cx, cz) are
+     * faked for the player, or Integer.MIN_VALUE if the chunk is real.
+     * Netty-safe.
+     */
+    int terrainFloor(UUID id, UUID worldId, int cx, int cz) {
+        TerrainState s = id != null ? terrainStates.get(id) : null;
+        if (s == null || worldId == null || !s.worldId.equals(worldId) || s.isReal(cx, cz)) return Integer.MIN_VALUE;
+        return s.floorY;
+    }
+
+    /** NEW (terrain protection): true if a block at this position is faked for the player. Netty-safe. */
+    boolean isTerrainHidden(UUID id, UUID worldId, int x, int y, int z) {
+        int floor = terrainFloor(id, worldId, x >> 4, z >> 4);
+        return floor != Integer.MIN_VALUE && y > floor;
+    }
+
+    /** NEW (terrain protection): true while this player is sent a fake surface. Netty-safe. */
+    boolean isTerrainProtected(UUID id) {
+        return id != null && terrainStates.containsKey(id);
+    }
+
+    /** NEW (terrain protection): bumped on every change, so cached entity results get redone. */
+    int getTerrainVersion(UUID id) {
+        Integer v = id != null ? terrainVersions.get(id) : null;
+        return v != null ? v : 0;
     }
 
     /**
@@ -1756,6 +1927,10 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         smartFillRefreshCooldown.remove(id);
         smartFillSightBacklog.remove(id);
         pendingFullRefresh.remove(id);
+        terrainStates.remove(id);
+        terrainSealedSince.remove(id);
+        terrainLeftAt.remove(id);
+        terrainVersions.remove(id);
         dbg("Cleaned up quit player: " + event.getPlayer().getName());
     }
 
@@ -1771,6 +1946,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         String toWorld = player.getWorld().getName();
         dbg("WorldChange: " + player.getName() + " → " + toWorld);
         if (smartFillReveal != null) smartFillReveal.clearSight(player.getUniqueId());
+        // NEW (terrain protection): the old world's chunks are gone client-side.
+        forgetTerrainProtection(player.getUniqueId());
         // The client dropped every chunk of the old world (RESPAWN already
         // cleared this on Netty; this covers servers/proxies that skip it).
         if (antiXrayEngine != null) {
@@ -1806,6 +1983,16 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             return;
         }
         if (smartFillReveal != null) smartFillReveal.clearSight(player.getUniqueId());
+        // NEW (terrain protection): the fake surface was worked out for the
+        // old spot. Dropped now and re-sent real once the teleport is done;
+        // the next pass fakes it again if the player is still sealed in.
+        if (terrainStates.containsKey(player.getUniqueId())) {
+            forgetTerrainProtection(player.getUniqueId());
+            terrainLeftAt.put(player.getUniqueId(), System.currentTimeMillis());
+            PlatformUtil.runForEntity(this, player, () -> {
+                if (player.isOnline()) refreshFullView(player, true);
+            });
+        }
         // NEW: re-check entities at the destination straight away. updateFor
         // runs on the player's scheduler, so after the teleport finished.
         if (entityHider != null) entityHider.updateFor(player);

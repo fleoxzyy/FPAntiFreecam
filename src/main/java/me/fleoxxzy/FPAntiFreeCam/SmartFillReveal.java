@@ -676,12 +676,15 @@ public final class SmartFillReveal implements Listener {
     /**
      * NEW (terrain protection): highest air block the player's current fill
      * reached, or Integer.MIN_VALUE if the player isn't sealed in (no fill
-     * yet, other world, open sky, or the fill ran out of budget). Any thread.
+     * yet, other world, open sky, the fill ran out of budget, or it started
+     * more than 4 blocks from the eye, e.g. after a teleport). Any thread.
      */
-    public int enclosedAirTop(UUID playerId, UUID worldId) {
+    public int enclosedAirTop(UUID playerId, UUID worldId, int ex, int ey, int ez) {
         State s = states.get(playerId);
         Fill f = s != null ? s.fill : null;
         if (f == null || f.skyOpen || f.sphereAll || !f.worldId.equals(worldId)) return Integer.MIN_VALUE;
+        int dx = ex - f.ox, dy = ey - f.oy, dz = ez - f.oz;
+        if (dx * dx + dy * dy + dz * dz > 16) return Integer.MIN_VALUE;
         return f.topY;
     }
 
