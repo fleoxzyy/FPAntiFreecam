@@ -347,6 +347,7 @@ public final class SmartFillEngine {
     static { Arrays.fill(TERRAIN_TOP, -1); }
     private static volatile int terrainStoneId = Integer.MIN_VALUE;
     private static volatile int terrainDirtId = Integer.MIN_VALUE;
+    private static volatile int terrainGrassId = Integer.MIN_VALUE;
 
     private static int stateId(String key) {
         try {
@@ -370,11 +371,18 @@ public final class SmartFillEngine {
         return id;
     }
 
+    private static int terrainGrassId() {
+        int id = terrainGrassId;
+        if (id == Integer.MIN_VALUE) terrainGrassId = id = stateId("grass_block");
+        return id;
+    }
+
     /**
-     * NEW (terrain protection): the block a column's top shows as, or -2 if
-     * this block isn't natural ground. Grass, podzol, mycelium, farmland and
-     * paths turn to dirt; sand, red sand, gravel and terracotta stay;
-     * everything else turns to stone. Netty-safe, cached per global id.
+     * NEW (terrain protection): the block a chunk's cube top shows as, or -2
+     * if this block isn't natural ground. Grass, podzol, mycelium, farmland
+     * and paths turn to grass; dirt stays dirt; sand, red sand, gravel, snow
+     * and terracotta stay; everything else turns to stone. Netty-safe,
+     * cached per global id.
      */
     static int terrainTop(int globalId) {
         if (globalId <= 0) return -2;
@@ -404,14 +412,18 @@ public final class SmartFillEngine {
                 || key.equals("dirt_path") || key.equals("grass_path") || key.equals("rooted_dirt")
                 || key.equals("suspicious_sand") || key.equals("suspicious_gravel");
         if (!ground) return -2;
-        if (terracotta || type == StateTypes.SAND || type == StateTypes.RED_SAND || type == StateTypes.GRAVEL) {
+        if (terracotta || type == StateTypes.SAND || type == StateTypes.RED_SAND || type == StateTypes.GRAVEL
+                || type == StateTypes.SNOW_BLOCK) {
             return globalId;
         }
         if (key.equals("suspicious_sand")) { int id = stateId("sand"); if (id >= 0) return id; }
         if (key.equals("suspicious_gravel")) { int id = stateId("gravel"); if (id >= 0) return id; }
         if (type == StateTypes.GRASS_BLOCK || type == StateTypes.PODZOL || type == StateTypes.MYCELIUM
-                || type == StateTypes.FARMLAND || type == StateTypes.DIRT || type == StateTypes.COARSE_DIRT
-                || key.equals("dirt_path") || key.equals("grass_path") || key.equals("rooted_dirt")) {
+                || type == StateTypes.FARMLAND || key.equals("dirt_path") || key.equals("grass_path")) {
+            int grass = terrainGrassId(); // default state, so never snowy
+            if (grass >= 0) return grass;
+        }
+        if (type == StateTypes.DIRT || type == StateTypes.COARSE_DIRT || key.equals("rooted_dirt")) {
             int dirt = terrainDirtId();
             if (dirt >= 0) return dirt;
         }

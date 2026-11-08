@@ -282,13 +282,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         }
     }
     private final Map<UUID, TerrainState> terrainStates = new ConcurrentHashMap<>();
-    private final Map<UUID, Long> terrainSealedSince = new ConcurrentHashMap<>();
-    private final Map<UUID, Long> terrainLeftAt = new ConcurrentHashMap<>();
+    /** Joined this long ago (ms) and the sealed-in check hasn't answered yet. */
+    private final Map<UUID, Long> terrainCheckPending = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> terrainVersions = new ConcurrentHashMap<>();
-    /** Sealed in this long before the surface is faked, so a brief gap closing doesn't reload everything. */
-    private static final long TERRAIN_SEAL_DELAY_MS = 500;
-    /** After the real surface came back, wait this long before faking it again. */
-    private static final long TERRAIN_REENTER_MS = 2000;
+    /** The join check gives up after this long (chunks never loaded, fill never ran). */
+    private static final long TERRAIN_CHECK_TIMEOUT_MS = 10_000;
     /** Blocks past a reveal depth before going back, so standing on the line doesn't flip it. */
     private static final int TERRAIN_HYSTERESIS = 2;
     /** Air the fill reached must stay this far under the fake floor. */
@@ -1463,19 +1461,31 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     /**
      * NEW (terrain protection): picks what surface this player is sent and
      * re-sends the chunks that changed. Player's thread, after the flood fill.
+     *
+     * Whether the player is sealed in is only checked once, right after
+     * joining underground (see onPlayerJoin). After that only the depth
+     * (heightmap, no block reads) and the reached air of the normal Smart
+     * Fill fill are used: the 3x3 turns real close to the surface, then
+     * everything, and protection doesn't come back until the next join.
      */
     private void updateTerrainProtection(Player p) {
         UUID id = p.getUniqueId();
         TerrainState prev = terrainStates.get(id);
         World world = p.getWorld();
         if (smartFillReveal == null || !isTerrainProtectionWorld(world) || !isSmartFillActiveFor(p)) {
-            terrainSealedSince.remove(id);
+            terrainCheckPending.remove(id);
             if (prev != null) clearTerrainProtection(p, true);
             return;
         }
+        Long pendingSince = terrainCheckPending.get(id);
+        if (prev == null && pendingSince == null) return; // nothing to do until the next join
+        if (prev != null && !prev.worldId.equals(world.getUID())) {
+            forgetTerrainProtection(id);
+            prev = null;
+            if (pendingSince == null) return;
+        }
         Location eye = p.getEyeLocation();
         int ex = eye.getBlockX(), ey = eye.getBlockY(), ez = eye.getBlockZ();
-        int airTop = smartFillReveal.enclosedAirTop(id, world.getUID(), ex, ey, ez);
         int depth;
         try {
             depth = world.getHighestBlockYAt(ex, ez) - ey;
@@ -1483,29 +1493,41 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
             depth = Integer.MIN_VALUE;
         }
         int allDepth = terrainRevealAllDepth, nearDepth = terrainReveal3x3Depth;
-        boolean sealed = airTop != Integer.MIN_VALUE
-                && depth > allDepth + (prev == null ? TERRAIN_HYSTERESIS : 0);
         long now = System.currentTimeMillis();
-        if (!sealed) {
-            terrainSealedSince.remove(id);
-            if (prev != null) clearTerrainProtection(p, true);
-            return;
-        }
-        if (prev == null || !prev.worldId.equals(world.getUID())) {
-            Long since = terrainSealedSince.putIfAbsent(id, now);
-            if (since == null || now - since < TERRAIN_SEAL_DELAY_MS) return;
-            if (now - terrainLeftAt.getOrDefault(id, 0L) < TERRAIN_REENTER_MS) return;
-            prev = null;
+
+        int airTop;
+        if (pendingSince != null) {
+            airTop = smartFillReveal.enclosedAirTop(id, world.getUID(), ex, ey, ez);
+            if (airTop == SmartFillReveal.SKY_NOT_READY) {
+                if (now - pendingSince < TERRAIN_CHECK_TIMEOUT_MS) return;
+                airTop = Integer.MIN_VALUE; // no answer: real surface
+            }
+            terrainCheckPending.remove(id);
+            if (airTop == Integer.MIN_VALUE || depth <= allDepth + (prev == null ? TERRAIN_HYSTERESIS : 0)) {
+                dbg("Terrain protection join check for " + p.getName() + ": not sealed in");
+                if (prev != null) clearTerrainProtection(p, true);
+                return;
+            }
+            dbg("Terrain protection join check for " + p.getName() + ": sealed in (air up to Y=" + airTop + ")");
+        } else {
+            if (depth <= allDepth) {
+                clearTerrainProtection(p, true);
+                return;
+            }
+            airTop = smartFillReveal.reachedAirTop(id, world.getUID());
         }
 
         boolean near = depth <= nearDepth + (prev != null && prev.near ? TERRAIN_HYSTERESIS : 0);
         int pcx = p.getLocation().getBlockX() >> 4, pcz = p.getLocation().getBlockZ() >> 4;
-        int floor = airTop + TERRAIN_FLOOR_GAP;
+        // Floor stays above the player and the air they can reach, so they
+        // never dig into or look at the fake blocks from below.
+        int need = Math.max(airTop, ey) + TERRAIN_FLOOR_GAP;
+        int floor;
         boolean raised = false;
-        if (prev != null && prev.floorY >= floor) {
+        if (prev != null && prev.floorY >= need) {
             floor = prev.floorY;
         } else {
-            floor += TERRAIN_FLOOR_MARGIN;
+            floor = need + TERRAIN_FLOOR_MARGIN;
             raised = prev != null;
         }
         TerrainState next = new TerrainState(near, world.getUID(), pcx, pcz, floor);
@@ -1544,18 +1566,45 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     /** NEW (terrain protection): back to the real surface. Player's thread. */
     private void clearTerrainProtection(Player p, boolean resend) {
         UUID id = p.getUniqueId();
-        terrainSealedSince.remove(id);
         if (terrainStates.remove(id) == null) return;
         terrainVersions.merge(id, 1, Integer::sum);
-        terrainLeftAt.put(id, System.currentTimeMillis());
         dbg("Terrain protection off for " + p.getName());
         if (resend) refreshFullView(p, true);
     }
 
-    /** NEW (terrain protection): forgets the state without a re-send (client dropped its chunks). Any thread. */
+    /**
+     * NEW (terrain protection): forgets the state without a re-send (client
+     * dropped its chunks). Leaves a pending join check alone, since the
+     * JOIN_GAME packet can go out after PlayerJoinEvent. Any thread.
+     */
     void forgetTerrainProtection(UUID id) {
-        terrainSealedSince.remove(id);
         if (terrainStates.remove(id) != null) terrainVersions.merge(id, 1, Integer::sum);
+    }
+
+    /** NEW (terrain protection): the join check for this player hasn't answered yet. Netty-safe. */
+    boolean isTerrainCheckPending(UUID id) {
+        return id != null && terrainCheckPending.containsKey(id);
+    }
+
+    /**
+     * NEW (terrain protection): starts the sealed-in check if the player is
+     * deep enough underground. Only called on join and world change, so
+     * nobody is scanned all the time. Player's thread.
+     */
+    private void startTerrainCheck(Player p) {
+        UUID id = p.getUniqueId();
+        terrainCheckPending.remove(id);
+        if (smartFillReveal == null || !isTerrainProtectionWorld(p.getWorld()) || !isSmartFillActiveFor(p)) return;
+        Location eye = p.getEyeLocation();
+        int depth;
+        try {
+            depth = p.getWorld().getHighestBlockYAt(eye.getBlockX(), eye.getBlockZ()) - eye.getBlockY();
+        } catch (Exception e) {
+            return;
+        }
+        if (depth <= terrainRevealAllDepth + TERRAIN_HYSTERESIS) return;
+        terrainCheckPending.put(id, System.currentTimeMillis());
+        dbg("Terrain protection join check started for " + p.getName() + " (depth " + depth + ")");
     }
 
     /**
@@ -1832,6 +1881,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (isWorldProtected(player.getWorld().getName())) {
             handlePlayerInitialState(player, false);
         }
+        // NEW (terrain protection): the only time a player is checked for being sealed in.
+        startTerrainCheck(player);
         if (freecamDetector != null) freecamDetector.scheduleJoinProbe(player);
         // NEW: first line-of-sight check right away, not after up to 250 ms.
         if (entityHider != null) entityHider.updateFor(player);
@@ -1928,8 +1979,7 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         smartFillSightBacklog.remove(id);
         pendingFullRefresh.remove(id);
         terrainStates.remove(id);
-        terrainSealedSince.remove(id);
-        terrainLeftAt.remove(id);
+        terrainCheckPending.remove(id);
         terrainVersions.remove(id);
         dbg("Cleaned up quit player: " + event.getPlayer().getName());
     }
@@ -1947,7 +1997,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         dbg("WorldChange: " + player.getName() + " → " + toWorld);
         if (smartFillReveal != null) smartFillReveal.clearSight(player.getUniqueId());
         // NEW (terrain protection): the old world's chunks are gone client-side.
+        // Arriving underground in the new world counts like a join.
         forgetTerrainProtection(player.getUniqueId());
+        startTerrainCheck(player);
         // The client dropped every chunk of the old world (RESPAWN already
         // cleared this on Netty; this covers servers/proxies that skip it).
         if (antiXrayEngine != null) {
@@ -1985,10 +2037,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (smartFillReveal != null) smartFillReveal.clearSight(player.getUniqueId());
         // NEW (terrain protection): the fake surface was worked out for the
         // old spot. Dropped now and re-sent real once the teleport is done;
-        // the next pass fakes it again if the player is still sealed in.
+        // it only comes back on the next join.
         if (terrainStates.containsKey(player.getUniqueId())) {
             forgetTerrainProtection(player.getUniqueId());
-            terrainLeftAt.put(player.getUniqueId(), System.currentTimeMillis());
             PlatformUtil.runForEntity(this, player, () -> {
                 if (player.isOnline()) refreshFullView(player, true);
             });

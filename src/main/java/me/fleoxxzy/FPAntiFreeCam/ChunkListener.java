@@ -854,10 +854,12 @@ public final class ChunkListener implements PacketListener {
 
     /**
      * NEW (terrain protection): the player is sealed in underground, so
-     * everything above the fake floor is rebuilt as plain ground at the real
-     * heights: the top block simplified (SmartFillEngine#terrainTop), stone
-     * under it, air above. Builds, trees, water and block entities are gone,
-     * and light and heightmaps match the fake blocks.
+     * every chunk above the fake floor becomes one flat cube: stone up to
+     * the chunk's highest natural ground, topped with that block simplified
+     * (SmartFillEngine#terrainTop), air above. Builds, trees, water and
+     * block entities are gone, and light and heightmaps match the cube.
+     * Sections that end up all stone or all air are swapped as a whole;
+     * only the floor and top sections are set block by block.
      */
     private void applyTerrainProtection(PacketSendEvent event, Player player) {
         UUID id = player.getUniqueId();
@@ -879,63 +881,81 @@ public final class ChunkListener implements PacketListener {
         }
         int minY = world.getMinHeight();
         int height = sections.length * 16;
-        if (floor >= minY + height - 1) return;
+        if (floor >= minY + height - 2) return;
         int stone = SmartFillEngine.terrainStoneId();
         if (stone < 0) return;
 
-        // Ground per column: highest natural ground block above the floor.
-        int[] ground = new int[256];
-        int[] topIds = new int[256];
-        int maxGround = floor;
-        for (int col = 0; col < 256; col++) {
-            int lx = col & 15, lz = col >> 4;
-            int g = floor, gid = -2;
-            scan:
-            for (int si = sections.length - 1; si >= 0; si--) {
-                int base = minY + (si << 4);
-                if (base + 15 <= floor) break;
-                BaseChunk s = sections[si];
-                if (s == null || s.isEmpty()) continue;
-                for (int ly = 15; ly >= 0; ly--) {
-                    int y = base + ly;
-                    if (y <= floor) break scan;
-                    int t = SmartFillEngine.terrainTop(s.getBlockId(lx, ly, lz));
-                    if (t != -2) { g = y; gid = t; break scan; }
+        // Cube height: the highest layer above the floor with natural ground
+        // in it. Its most common ground block is the cube's top.
+        int top = floor, topId = 0; // no ground above the floor: just air over it
+        int[] kinds = new int[8], counts = new int[8];
+        scan:
+        for (int si = sections.length - 1; si >= 0; si--) {
+            int base = minY + (si << 4);
+            if (base + 15 <= floor) break;
+            BaseChunk s = sections[si];
+            if (s == null || s.isEmpty()) continue;
+            for (int ly = 15; ly >= 0; ly--) {
+                int y = base + ly;
+                if (y <= floor) break scan;
+                int n = 0;
+                for (int col = 0; col < 256; col++) {
+                    int t = SmartFillEngine.terrainTop(s.getBlockId(col & 15, ly, col >> 4));
+                    if (t == -2) continue;
+                    int k = 0;
+                    while (k < n && kinds[k] != t) k++;
+                    if (k == n) {
+                        if (n == kinds.length) continue;
+                        kinds[n] = t; counts[n++] = 0;
+                    }
+                    counts[k]++;
                 }
+                if (n == 0) continue;
+                int best = 0;
+                for (int k = 1; k < n; k++) if (counts[k] > counts[best]) best = k;
+                top = y;
+                topId = kinds[best];
+                break scan;
             }
-            ground[col] = g;
-            topIds[col] = gid;
-            if (g > maxGround) maxGround = g;
         }
 
-        long[][] bits = new long[sections.length][];
+        boolean[] dirty = new boolean[sections.length];
         long replaced = 0;
         for (int si = 0; si < sections.length; si++) {
             int base = minY + (si << 4);
             if (base + 15 <= floor) continue;
             BaseChunk s = sections[si];
             if (s == null) continue;
-            if (s.isEmpty() && base > maxGround) continue; // all air already
+            if (s.isEmpty() && base > top) continue; // all air already
+            boolean allStone = base > floor && base + 15 < top;
+            boolean allAir = base > top;
+            if ((allStone || allAir) && s instanceof Chunk_v1_18 sec) {
+                int want = allStone ? stone : 0;
+                if (isUniform(sec, want)) continue;
+                sections[si] = new Chunk_v1_18(allStone ? 4096 : 0,
+                        new DataPalette(new SingletonPalette(want), null, PaletteType.CHUNK), sec.getBiomeData());
+                replaced += 4096;
+                continue;
+            }
             for (int ly = 0; ly < 16; ly++) {
                 int y = base + ly;
                 if (y <= floor) continue;
+                int want = y < top ? stone : y == top ? topId : 0;
                 for (int col = 0; col < 256; col++) {
-                    int g = ground[col];
-                    int want = y < g ? stone : y == g ? topIds[col] : 0;
                     int lx = col & 15, lz = col >> 4;
                     if (s.getBlockId(lx, ly, lz) == want) continue;
                     s.set(lx, ly, lz, want);
-                    markReplaced(bits, si, lx, ly, lz);
+                    dirty[si] = true;
                     replaced++;
                 }
             }
         }
+        int[] ground = new int[256];
+        Arrays.fill(ground, top);
         boolean tiles = stripTileEntitiesAbove(column, floor);
         terrainGrounds.computeIfAbsent(id, k -> new ConcurrentHashMap<>()).put(columnKey(cx, cz), ground);
         if (replaced == 0 && !tiles) return;
 
-        boolean[] dirty = new boolean[sections.length];
-        for (int si = 0; si < sections.length; si++) dirty[si] = bits[si] != null;
         normalizeSections(sections, dirty);
         try {
             relightTerrain(wrapper.getLightData(), minY, floor, ground, true);
@@ -949,6 +969,13 @@ public final class ChunkListener implements PacketListener {
         plugin.addBlocksReplaced(replaced);
         plugin.dbg("CHUNK_DATA " + cx + "," + cz + " terrain protection for " + player.getName()
                 + " (" + replaced + " blocks, floor Y=" + floor + ")");
+    }
+
+    /** True if the section is already one block everywhere (singleton palette). */
+    private static boolean isUniform(Chunk_v1_18 s, int state) {
+        DataPalette dp = s.getChunkData();
+        return dp != null && dp.storage == null && dp.palette instanceof SingletonPalette
+                && dp.palette.idToState(0) == state;
     }
 
     private boolean stripTileEntitiesAbove(Column column, int floor) {

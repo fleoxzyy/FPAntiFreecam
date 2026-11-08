@@ -92,6 +92,10 @@ public final class SmartFillReveal implements Listener {
     private static final int FILL_BUDGET = 40_000;
     /** NEW (terrain protection): blocks read walking up to the sky per fill. Past this it counts as open. */
     private static final int SKY_READ_BUDGET = 20_000;
+    /** NEW (terrain protection): join check not answered yet (chunks loading): fill again this often. */
+    private static final long SKY_RETRY_MS = 1_000L;
+    /** NEW (terrain protection): enclosedAirTop result while the join check has no answer yet. */
+    public static final int SKY_NOT_READY = Integer.MAX_VALUE;
     /** Re-fill once the eye moved this far (squared, in blocks). */
     private static final int FILL_MOVE_THRESHOLD_SQ = 2 * 2;
     /** Same, for a fill that ran out of budget (whole sphere revealed). */
@@ -121,8 +125,10 @@ public final class SmartFillReveal implements Listener {
         /** Feet cell (second seed, near radius). Only used to share fills. */
         int fx, fy, fz;
         // NEW (terrain protection): the fill reached open sky (or wasn't
-        // checked), and the highest air cell it reached.
+        // checked), whether it looked for the sky at all, and the highest
+        // air cell it reached.
         boolean skyOpen = true;
+        boolean skyChecked;
         int topY = Integer.MIN_VALUE;
 
         Fill(LongSet cells, LongSet sphereChunks, boolean sphereAll, UUID worldId,
@@ -336,14 +342,18 @@ public final class SmartFillReveal implements Listener {
         long now = System.currentTimeMillis();
 
         Fill prev = s.fill;
+        // NEW (terrain protection): only the join check looks for the sky.
+        boolean wantSky = plugin.isTerrainProtectionWorld(world) && plugin.isTerrainCheckPending(id);
         if (prev != null && prev.worldId.equals(world.getUID()) && !s.dirty) {
             int mx = ex - prev.ox, my = ey - prev.oy, mz = ez - prev.oz;
             // IMPROVEMENT: a fill that ran out of budget reveals the whole
             // sphere around the live position, so moving doesn't change it.
             // It is kept until the player moved 8 blocks instead of 2.
             int moveSq = prev.sphereAll ? SPHERE_MOVE_THRESHOLD_SQ : FILL_MOVE_THRESHOLD_SQ;
-            if (mx * mx + my * my + mz * mz < moveSq
-                    && now - prev.computedAt < SIGHT_MAX_AGE_MS) return;
+            boolean fresh = mx * mx + my * my + mz * mz < moveSq && now - prev.computedAt < SIGHT_MAX_AGE_MS;
+            // Join check not answered yet (chunks around still loading): try again once a second.
+            if (fresh && wantSky && !prev.skyChecked && now - prev.computedAt >= SKY_RETRY_MS) fresh = false;
+            if (fresh) return;
         }
         // IMPROVEMENT: at most MAX_FILLS_PER_PASS fills start per 5-tick pass,
         // so many players moving at once don't all fill in the same tick.
@@ -360,17 +370,16 @@ public final class SmartFillReveal implements Listener {
             // NEW (follow-terrain): the highest masked spot nearby can be
             // inside a mountain, above ceiling-y.
             int ceilingY = plugin.maxRevealTopNear(world, ex, ez, revealRadius + 2);
-            if (ey - revealRadius - 2 > ceilingY && feet.getBlockY() - nearRadius - 4 > ceilingY) {
+            if (!wantSky && ey - revealRadius - 2 > ceilingY && feet.getBlockY() - nearRadius - 4 > ceilingY) {
                 // IMPROVEMENT: nothing the fill can reach is ever masked up
                 // here, so its result would be empty anyway. Same answer
                 // without reading any blocks.
                 next = new Fill(LongSet.EMPTY, LongSet.EMPTY, false, world.getUID(), ex, ey, ez, now);
             } else {
                 int fx = feet.getBlockX(), fy = feet.getBlockY(), fz = feet.getBlockZ();
-                next = sharedFill(s, world.getUID(), ex, ey, ez, fx, fy, fz, now);
+                next = wantSky ? null : sharedFill(s, world.getUID(), ex, ey, ez, fx, fy, fz, now);
                 if (next == null) {
-                    next = computeFill(world, ex, ey, ez, fx, fy, fz, now, ceilingY,
-                            plugin.isTerrainProtectionWorld(world));
+                    next = computeFill(world, ex, ey, ez, fx, fy, fz, now, ceilingY, wantSky);
                     next.fx = fx; next.fy = fy; next.fz = fz;
                 }
             }
@@ -556,9 +565,15 @@ public final class SmartFillReveal implements Listener {
         // NEW (terrain protection): walk up from the top reached cell of every
         // column. A column is open if nothing that stops sight sits between
         // it and the sky. Budget hit, a full sphere or an unreadable chunk
-        // counts as open, so the real surface is sent when unsure.
+        // counts as open, so the real surface is sent when unsure. The
+        // highest reached air is kept on every fill, so the fake floor can
+        // follow a player digging up without looking for the sky again.
         boolean skyOpen = true;
         int airTop = Integer.MIN_VALUE;
+        for (int i = 0; i < tail; i++) {
+            int y = oy + unpackY(queue[i]);
+            if (y > airTop) airTop = y;
+        }
         if (checkSky && !sphereAll && !skySeen && tail > 0) {
             int[] colTop = buf.colTop;
             if (colTop.length < D * D) buf.colTop = colTop = new int[D * D];
@@ -568,7 +583,6 @@ public final class SmartFillReveal implements Listener {
                 int ci2 = (unpackX(c) + R) * D + (unpackZ(c) + R);
                 int y = oy + unpackY(c);
                 if (y > colTop[ci2]) colTop[ci2] = y;
-                if (y > airTop) airTop = y;
             }
             skyOpen = false;
             int reads = SKY_READ_BUDGET;
@@ -650,11 +664,13 @@ public final class SmartFillReveal implements Listener {
         }
 
         return finish(new Fill(cells, sphereChunks != null ? sphereChunks : LongSet.EMPTY, sphereAll,
-                world.getUID(), ox, oy, oz, now), skyOpen || sphereChunks != null, airTop);
+                world.getUID(), ox, oy, oz, now), skyOpen || sphereChunks != null, airTop,
+                checkSky && sphereChunks == null); // unloaded chunks nearby: not an answer yet
     }
 
-    private static Fill finish(Fill f, boolean skyOpen, int airTop) {
+    private static Fill finish(Fill f, boolean skyOpen, int airTop, boolean skyChecked) {
         f.skyOpen = skyOpen;
+        f.skyChecked = skyChecked;
         f.topY = airTop;
         return f;
     }
@@ -674,17 +690,32 @@ public final class SmartFillReveal implements Listener {
     }
 
     /**
-     * NEW (terrain protection): highest air block the player's current fill
-     * reached, or Integer.MIN_VALUE if the player isn't sealed in (no fill
-     * yet, other world, open sky, the fill ran out of budget, or it started
-     * more than 4 blocks from the eye, e.g. after a teleport). Any thread.
+     * NEW (terrain protection): the join check's answer. Highest air block
+     * the fill reached if the player is sealed in, Integer.MIN_VALUE if not
+     * (open sky or the fill ran out of budget), or SKY_NOT_READY if no fill
+     * has looked for the sky from here yet. Any thread.
      */
     public int enclosedAirTop(UUID playerId, UUID worldId, int ex, int ey, int ez) {
         State s = states.get(playerId);
         Fill f = s != null ? s.fill : null;
-        if (f == null || f.skyOpen || f.sphereAll || !f.worldId.equals(worldId)) return Integer.MIN_VALUE;
+        // No fill yet, an old one, or one that hasn't looked for the sky: ask again later.
+        if (f == null || !f.skyChecked || !f.worldId.equals(worldId)) return SKY_NOT_READY;
         int dx = ex - f.ox, dy = ey - f.oy, dz = ez - f.oz;
-        if (dx * dx + dy * dy + dz * dz > 16) return Integer.MIN_VALUE;
+        if (dx * dx + dy * dy + dz * dz > 16) return SKY_NOT_READY;
+        if (f.skyOpen || f.sphereAll) return Integer.MIN_VALUE;
+        return f.topY;
+    }
+
+    /**
+     * NEW (terrain protection): highest air block the player's current fill
+     * reached, without checking the sky, or Integer.MIN_VALUE if unknown.
+     * A fill that ran out of budget reports nothing, so the floor isn't
+     * raised to the whole sphere. Any thread.
+     */
+    public int reachedAirTop(UUID playerId, UUID worldId) {
+        State s = states.get(playerId);
+        Fill f = s != null ? s.fill : null;
+        if (f == null || f.sphereAll || !f.worldId.equals(worldId)) return Integer.MIN_VALUE;
         return f.topY;
     }
 
