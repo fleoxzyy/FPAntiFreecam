@@ -92,7 +92,7 @@ OPs are protected like everyone else. Give a bypass permission to staff or build
 # ─────────────────────────────────────────────────────────────────────
 
 # Do not change this manually.
-config-version: 5.8
+config-version: 5.9
 
 # ── General ──────────────────────────────────────────────────────────
 settings:
@@ -174,6 +174,18 @@ protection:
 
     # Blocks checked per player per second. Lower = less server time.
     reveal-sight-budget: 60000
+
+  # Sealed in a cave with no way up? The surface is sent as plain
+  # stone and dirt, so freecam shows nothing real up there.
+  # Needs Smart Fill. Overworld only.
+  terrain-protection:
+    enabled: true
+
+    # Blocks below the surface where the 3x3 chunks around you turn real.
+    reveal-3x3-depth: 16
+
+    # Blocks below the surface where everything turns real.
+    reveal-all-depth: 6
 
 # ── What hidden blocks look like ─────────────────────────────────────
 replacement:
