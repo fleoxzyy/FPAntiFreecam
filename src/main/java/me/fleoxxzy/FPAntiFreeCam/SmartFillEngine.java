@@ -395,33 +395,6 @@ public final class SmartFillEngine {
         return out;
     }
 
-    /** Per global id: 0 unknown, 1 water, 2 not water. Racy writes are harmless. */
-    private static final byte[] TERRAIN_WATER = new byte[1 << 16];
-
-    /**
-     * NEW (terrain protection): water, or a plant / bubble column that only
-     * grows in it. A column with this above its ground is a river or sea
-     * bed. Netty-safe, cached per global id.
-     */
-    static boolean isTerrainWater(int globalId) {
-        if (globalId <= 0) return false;
-        if (globalId < TERRAIN_WATER.length) {
-            byte c = TERRAIN_WATER[globalId];
-            if (c != 0) return c == 1;
-        }
-        boolean water;
-        try {
-            WrappedBlockState st = WrappedBlockState.getByGlobalId(globalId, false);
-            StateType t = st != null ? st.getType() : null;
-            water = t == StateTypes.WATER || t == StateTypes.BUBBLE_COLUMN || t == StateTypes.KELP
-                    || t == StateTypes.KELP_PLANT || t == StateTypes.SEAGRASS || t == StateTypes.TALL_SEAGRASS;
-        } catch (Exception e) {
-            water = false;
-        }
-        if (globalId < TERRAIN_WATER.length) TERRAIN_WATER[globalId] = (byte) (water ? 1 : 2);
-        return water;
-    }
-
     private static int computeTerrainTop(int globalId) {
         StateType type;
         try {

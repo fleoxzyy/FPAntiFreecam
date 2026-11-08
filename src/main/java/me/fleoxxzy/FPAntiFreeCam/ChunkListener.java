@@ -885,19 +885,15 @@ public final class ChunkListener implements PacketListener {
         int stone = SmartFillEngine.terrainStoneId();
         if (stone < 0) return;
 
-        // Ground per column: the highest natural ground above the floor, and
-        // whether water sits over it. A chunk that's mostly water is
-        // a river or sea: its cube follows the bed (gravel, sand, clay) at the
-        // middle bed height, and the water above becomes air. Any other chunk
-        // uses its highest dry ground. The top block is the most common
-        // ground block of those columns.
-        int[] colGround = new int[256], colId = new int[256];
-        boolean[] wet = new boolean[256];
-        int wetCount = 0;
+        // Ground per column: the highest natural ground above the floor.
+        // Water, seagrass and kelp aren't ground, so they turn to air like
+        // everything else that isn't. The cube sits at the highest ground,
+        // topped with the most common surface block of the chunk.
+        int top = floor;
+        int[] kinds = new int[8], counts = new int[8];
+        int n = 0;
         for (int col = 0; col < 256; col++) {
             int lx = col & 15, lz = col >> 4;
-            int g = floor, gid = -2;
-            boolean w = false;
             scan:
             for (int si = sections.length - 1; si >= 0; si--) {
                 int base = minY + (si << 4);
@@ -907,46 +903,25 @@ public final class ChunkListener implements PacketListener {
                 for (int ly = 15; ly >= 0; ly--) {
                     int y = base + ly;
                     if (y <= floor) break scan;
-                    int bid = s.getBlockId(lx, ly, lz);
-                    int t = SmartFillEngine.terrainTop(bid);
-                    if (t != -2) { g = y; gid = t; break scan; }
-                    if (!w && SmartFillEngine.isTerrainWater(bid)) w = true;
+                    int t = SmartFillEngine.terrainTop(s.getBlockId(lx, ly, lz));
+                    if (t == -2) continue;
+                    if (y > top) top = y;
+                    int k = 0;
+                    while (k < n && kinds[k] != t) k++;
+                    if (k == n) {
+                        if (n == kinds.length) break scan;
+                        kinds[n] = t; counts[n++] = 0;
+                    }
+                    counts[k]++;
+                    break scan;
                 }
             }
-            colGround[col] = g;
-            colId[col] = gid;
-            wet[col] = w;
-            if (w) wetCount++;
-        }
-        boolean waterChunk = wetCount * 2 > 256;
-        int top = floor;
-        if (waterChunk) {
-            int[] beds = new int[wetCount];
-            for (int col = 0, n = 0; col < 256; col++) if (wet[col]) beds[n++] = colGround[col];
-            Arrays.sort(beds);
-            top = beds[wetCount / 2];
-        } else {
-            for (int col = 0; col < 256; col++) if (!wet[col] && colGround[col] > top) top = colGround[col];
         }
         int topId = 0; // no ground above the floor: just air over it
-        if (top > floor) {
-            int[] kinds = new int[8], counts = new int[8];
-            int n = 0;
-            for (int col = 0; col < 256; col++) {
-                int t = colId[col];
-                if (t == -2 || wet[col] != waterChunk) continue;
-                if (!waterChunk && colGround[col] != top) continue;
-                int k = 0;
-                while (k < n && kinds[k] != t) k++;
-                if (k == n) {
-                    if (n == kinds.length) continue;
-                    kinds[n] = t; counts[n++] = 0;
-                }
-                counts[k]++;
-            }
+        if (n > 0) {
             int best = 0;
             for (int k = 1; k < n; k++) if (counts[k] > counts[best]) best = k;
-            topId = n > 0 ? kinds[best] : stone;
+            topId = kinds[best];
         }
 
         boolean[] dirty = new boolean[sections.length];
