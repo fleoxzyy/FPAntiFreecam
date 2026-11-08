@@ -334,6 +334,7 @@ public final class ChunkListener implements PacketListener {
                 WrapperPlayServerUnloadChunk unload = new WrapperPlayServerUnloadChunk(event);
                 forgetChunk(uuid, unload.getChunkX(), unload.getChunkZ());
                 forgetFlatMasked(uuid, unload.getChunkX(), unload.getChunkZ());
+                forgetTerrainGround(uuid, unload.getChunkX(), unload.getChunkZ());
                 AntiXrayEngine xray = plugin.getAntiXrayEngine();
                 if (xray != null) xray.forgetChunk(uuid, unload.getChunkX(), unload.getChunkZ());
             } catch (Exception ignored) {}
@@ -342,6 +343,7 @@ public final class ChunkListener implements PacketListener {
         if (type == PacketType.Play.Server.RESPAWN || type == PacketType.Play.Server.JOIN_GAME) {
             maskedChunks.remove(uuid); // client drops every chunk on respawn/world change
             flatMaskedChunks.remove(uuid);
+            terrainGrounds.remove(uuid);
             plugin.forgetTerrainProtection(uuid); // NEW (terrain protection): worked out again at the new spot
             if (hider != null) hider.onClientReset(uuid); // and every entity
             AntiXrayEngine xray = plugin.getAntiXrayEngine();
@@ -402,6 +404,11 @@ public final class ChunkListener implements PacketListener {
         }
 
         if (blockPacket) {
+            // NEW (terrain protection): changes on the faked surface never reach the client.
+            if (type != PacketType.Play.Server.CHUNK_DATA && plugin.isTerrainProtected(uuid)
+                    && dropTerrainBlockChanges(event, player, type)) {
+                return;
+            }
             if (xrayActive) {
                 handleBlockPacket(event, player, type, true);
             } else if (type == PacketType.Play.Server.CHUNK_DATA) {
@@ -854,7 +861,10 @@ public final class ChunkListener implements PacketListener {
      */
     private void applyTerrainProtection(PacketSendEvent event, Player player) {
         UUID id = player.getUniqueId();
-        if (!plugin.isTerrainProtected(id)) return;
+        if (!plugin.isTerrainProtected(id)) {
+            terrainGrounds.remove(id);
+            return;
+        }
         World world = player.getWorld();
         if (world == null) return;
         WrapperPlayServerChunkData wrapper = new WrapperPlayServerChunkData(event);
@@ -863,7 +873,10 @@ public final class ChunkListener implements PacketListener {
         if (sections == null) return;
         int cx = column.getX(), cz = column.getZ();
         int floor = plugin.terrainFloor(id, world.getUID(), cx, cz);
-        if (floor == Integer.MIN_VALUE) return;
+        if (floor == Integer.MIN_VALUE) {
+            forgetTerrainGround(id, cx, cz); // sent real now
+            return;
+        }
         int minY = world.getMinHeight();
         int height = sections.length * 16;
         if (floor >= minY + height - 1) return;
@@ -918,13 +931,14 @@ public final class ChunkListener implements PacketListener {
             }
         }
         boolean tiles = stripTileEntitiesAbove(column, floor);
+        terrainGrounds.computeIfAbsent(id, k -> new ConcurrentHashMap<>()).put(columnKey(cx, cz), ground);
         if (replaced == 0 && !tiles) return;
 
         boolean[] dirty = new boolean[sections.length];
         for (int si = 0; si < sections.length; si++) dirty[si] = bits[si] != null;
         normalizeSections(sections, dirty);
         try {
-            relightTerrain(wrapper.getLightData(), minY, floor, ground);
+            relightTerrain(wrapper.getLightData(), minY, floor, ground, true);
         } catch (Exception e) {
             plugin.dbg("Terrain protection light error: " + e.getMessage());
         }
@@ -956,10 +970,25 @@ public final class ChunkListener implements PacketListener {
     }
 
     /** Above the floor: no block light, full sky light over the ground, none in it. */
-    private static void relightTerrain(LightData light, int minY, int floor, int[] ground) {
+    private static void relightTerrain(LightData light, int minY, int floor, int[] ground, boolean sky) {
         if (light == null) return;
         relight(light.getBlockLightMask(), light.getBlockLightArray(), minY, floor, ground, false);
-        relight(light.getSkyLightMask(), light.getSkyLightArray(), minY, floor, ground, true);
+        if (sky) relight(light.getSkyLightMask(), light.getSkyLightArray(), minY, floor, ground, true);
+    }
+
+    private static final int[] NO_GROUND = new int[256];
+
+    /** NEW (terrain protection): ground heights of the chunks we faked, per player, for light updates. */
+    private final Map<UUID, Map<Long, int[]>> terrainGrounds = new ConcurrentHashMap<>();
+
+    private int[] terrainGround(UUID id, int cx, int cz) {
+        Map<Long, int[]> m = terrainGrounds.get(id);
+        return m != null ? m.get(columnKey(cx, cz)) : null;
+    }
+
+    private void forgetTerrainGround(UUID id, int cx, int cz) {
+        Map<Long, int[]> m = terrainGrounds.get(id);
+        if (m != null) m.remove(columnKey(cx, cz));
     }
 
     private static void relight(BitSet mask, byte[][] arrays, int minY, int floor, int[] ground, boolean sky) {
@@ -1026,6 +1055,56 @@ public final class ChunkListener implements PacketListener {
             }
         } catch (Exception e) {
             plugin.dbg("Terrain protection heightmap error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * NEW (terrain protection): a BLOCK_CHANGE / MULTI_BLOCK_CHANGE entry on
+     * the faked surface is dropped, the way the hidden Smart Fill band does
+     * it. True if the whole packet is gone (cancelled) and nothing else has
+     * to run for it.
+     */
+    private boolean dropTerrainBlockChanges(PacketSendEvent event, Player player,
+                                            PacketType.Play.Server type) {
+        UUID id = player.getUniqueId();
+        UUID worldId = player.getWorld().getUID();
+        try {
+            if (type == PacketType.Play.Server.BLOCK_CHANGE) {
+                Vector3i pos = new WrapperPlayServerBlockChange(event).getBlockPosition();
+                if (pos == null || !plugin.isTerrainHidden(id, worldId, pos.getX(), pos.getY(), pos.getZ())) {
+                    return false;
+                }
+                event.setCancelled(true);
+                plugin.dbg("BLOCK_CHANGE dropped at " + pos + " (terrain protection) for " + player.getName());
+                return true;
+            }
+            WrapperPlayServerMultiBlockChange wrapper = new WrapperPlayServerMultiBlockChange(event);
+            WrapperPlayServerMultiBlockChange.EncodedBlock[] blocks = wrapper.getBlocks();
+            if (blocks == null) return false;
+            List<WrapperPlayServerMultiBlockChange.EncodedBlock> kept = null;
+            for (int i = 0; i < blocks.length; i++) {
+                WrapperPlayServerMultiBlockChange.EncodedBlock b = blocks[i];
+                if (b != null && !plugin.isTerrainHidden(id, worldId, b.getX(), b.getY(), b.getZ())) {
+                    if (kept != null) kept.add(b);
+                    continue;
+                }
+                if (kept == null) {
+                    kept = new ArrayList<>(blocks.length);
+                    for (int j = 0; j < i; j++) if (blocks[j] != null) kept.add(blocks[j]);
+                }
+            }
+            if (kept == null) return false;
+            if (kept.isEmpty()) {
+                event.setCancelled(true);
+                plugin.dbg("MULTI_BLOCK_CHANGE dropped (terrain protection) for " + player.getName());
+                return true;
+            }
+            wrapper.setBlocks(kept.toArray(new WrapperPlayServerMultiBlockChange.EncodedBlock[0]));
+            event.markForReEncode(true);
+            return false;
+        } catch (Exception e) {
+            plugin.dbg("Terrain protection " + type + " error: " + e.getMessage());
+            return false;
         }
     }
 
@@ -1179,6 +1258,17 @@ public final class ChunkListener implements PacketListener {
         try {
             if (!plugin.isSmartFillEnabledFor(player) || !plugin.isSmartFillActiveFor(player)) return;
             WrapperPlayServerUpdateLight wrapper = new WrapperPlayServerUpdateLight(event);
+            // NEW (terrain protection): a torch or lava on the faked surface
+            // must not light it up; same light as the chunk send.
+            int terrainFloor = plugin.terrainFloor(player.getUniqueId(), player.getWorld().getUID(),
+                    wrapper.getX(), wrapper.getZ());
+            if (terrainFloor != Integer.MIN_VALUE && wrapper.getLightData() != null) {
+                int[] ground = terrainGround(player.getUniqueId(), wrapper.getX(), wrapper.getZ());
+                // Not faked by us yet: only the block light can be cleared safely.
+                relightTerrain(wrapper.getLightData(), player.getWorld().getMinHeight(), terrainFloor,
+                        ground != null ? ground : NO_GROUND, ground != null);
+                event.markForReEncode(true);
+            }
             Map<Long, MaskedChunk> m = maskedChunks.get(player.getUniqueId());
             MaskedChunk mc = m != null ? m.get(columnKey(wrapper.getX(), wrapper.getZ())) : null;
             if (mc == null || mc.sections == 0) return;
@@ -1600,10 +1690,16 @@ public final class ChunkListener implements PacketListener {
     private void handleBlockEntityData(PacketSendEvent event, Player player) {
         plugin.incrementPacketsProcessed();
         try {
-            if (!plugin.isPieChartProtectionEnabled()) return;
             WrapperPlayServerBlockEntityData wrapper = new WrapperPlayServerBlockEntityData(event);
             Vector3i pos = wrapper.getPosition();
             if (pos == null) return;
+            // NEW (terrain protection): chests and signs on the faked surface are gone.
+            if (plugin.isTerrainHidden(player.getUniqueId(), player.getWorld().getUID(),
+                    pos.getX(), pos.getY(), pos.getZ())) {
+                event.setCancelled(true);
+                return;
+            }
+            if (!plugin.isPieChartProtectionEnabled()) return;
 
             if (cancelIfShouldHide(event, player, pos.getY(), pos.getX(), pos.getZ())) {
                 plugin.dbg("BLOCK_ENTITY_DATA cancelled at " + pos + " for " + player.getName());
@@ -1751,8 +1847,11 @@ public final class ChunkListener implements PacketListener {
             UUID viewerId = player.getUniqueId();
             // Chunk mode relies on this to hide new entities in the zone, so
             // hide-entities alone also checks it (like the old spawn hider).
-            boolean zoneHidden = (plugin.isPieChartProtectionEnabled() || hider.isEnabled()) && !isPlayer
-                    && isEntityPositionHidden(player, entityPos[0], entityPos[1], entityPos[2]);
+            // NEW (terrain protection): players on the faked surface too.
+            boolean terrainHidden = plugin.isTerrainHidden(viewerId, player.getWorld().getUID(),
+                    entityPos[0], entityPos[1], entityPos[2]);
+            boolean zoneHidden = terrainHidden || ((plugin.isPieChartProtectionEnabled() || hider.isEnabled()) && !isPlayer
+                    && isEntityPositionHidden(player, entityPos[0], entityPos[1], entityPos[2]));
             if (hider.onSpawnPacket(viewerId, entityId, entityUuid, isPlayer, typeKey,
                     pos.getX(), pos.getY(), pos.getZ(), zoneHidden)) {
                 event.setCancelled(true);
@@ -1883,6 +1982,11 @@ public final class ChunkListener implements PacketListener {
      * of an un-positioned sound.
      */
     private boolean shouldCancelForPosition(Player player, int y, Integer x, Integer z) {
+        // NEW (terrain protection): nothing on the faked surface is real.
+        if (x != null && z != null
+                && plugin.isTerrainHidden(player.getUniqueId(), player.getWorld().getUID(), x, y, z)) {
+            return true;
+        }
         int hardFloorY = plugin.getVoidY(player.getWorld().getName());
         boolean smartFillEnabled = plugin.isSmartFillEnabledFor(player);
 
@@ -1955,6 +2059,11 @@ public final class ChunkListener implements PacketListener {
      * alone, matching how hard-floor blocks are handled.
      */
     private boolean cancelIfHiddenHardFloor(PacketSendEvent event, Player player, int x, int y, int z) {
+        // NEW (terrain protection): sounds, particles and effects on the faked surface.
+        if (plugin.isTerrainHidden(player.getUniqueId(), player.getWorld().getUID(), x, y, z)) {
+            event.setCancelled(true);
+            return true;
+        }
         if (!isAtOrBelowVoidY(player, y)) return false;
         if (!plugin.isSmartFillEnabledFor(player)) {
             if (!plugin.isProtectionActive(player)) return false;
@@ -2134,6 +2243,7 @@ public final class ChunkListener implements PacketListener {
     public void cleanupPlayer(UUID id) {
         maskedChunks.remove(id);
         flatMaskedChunks.remove(id);
+        terrainGrounds.remove(id);
     }
 
     /** NEW: Smart Fill palette cache (follow-terrain lookups from the reveal side). */
@@ -2155,6 +2265,8 @@ public final class ChunkListener implements PacketListener {
     public boolean isEntityPositionHidden(Player player, int x, int y, int z) {
         World world = player.getWorld();
         if (world == null || !plugin.isWorldProtected(world.getName())) return false;
+        // NEW (terrain protection): mobs, items and players on the faked surface.
+        if (plugin.isTerrainHidden(player.getUniqueId(), world.getUID(), x, y, z)) return true;
         if (!plugin.isProtectionActive(player) && !plugin.isSmartFillActiveFor(player)) return false;
         if (isAtOrBelowVoidY(player, y)) {
             if (!plugin.isSmartFillEnabledFor(player)) return plugin.isProtectionActive(player);
