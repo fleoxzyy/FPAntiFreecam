@@ -327,6 +327,98 @@ public final class SmartFillEngine {
         return key.endsWith("_leaves") || key.equals("leaves");
     }
 
+    // ── Terrain protection (NEW) ──────────────────────────────────────────
+
+    /**
+     * NEW (terrain protection): natural ground a column's fake surface is
+     * built on. Builds, trees, plants and fluids aren't ground, so they're
+     * skipped and end up as air.
+     */
+    private static final Set<StateType> GROUND_TYPES;
+    static {
+        Set<StateType> s = new HashSet<>(NATURAL_COVER_TYPES);
+        s.add(StateTypes.FARMLAND);
+        s.remove(StateTypes.ICE); // frozen oceans turn into empty basins like the rest
+        GROUND_TYPES = Collections.unmodifiableSet(s);
+    }
+
+    /** Fake top block per global id: -1 unknown, -2 not ground. Racy writes are harmless. */
+    private static final int[] TERRAIN_TOP = new int[1 << 16];
+    static { Arrays.fill(TERRAIN_TOP, -1); }
+    private static volatile int terrainStoneId = Integer.MIN_VALUE;
+    private static volatile int terrainDirtId = Integer.MIN_VALUE;
+
+    private static int stateId(String key) {
+        try {
+            WrappedBlockState s = WrappedBlockState.getByString("minecraft:" + key);
+            return s != null ? s.getGlobalId() : -1;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    /** NEW (terrain protection): stone's global id, or -1 if it can't be resolved. */
+    static int terrainStoneId() {
+        int id = terrainStoneId;
+        if (id == Integer.MIN_VALUE) terrainStoneId = id = STONE_STATE != null ? STONE_STATE.getGlobalId() : -1;
+        return id;
+    }
+
+    private static int terrainDirtId() {
+        int id = terrainDirtId;
+        if (id == Integer.MIN_VALUE) terrainDirtId = id = stateId("dirt");
+        return id;
+    }
+
+    /**
+     * NEW (terrain protection): the block a column's top shows as, or -2 if
+     * this block isn't natural ground. Grass, podzol, mycelium, farmland and
+     * paths turn to dirt; sand, red sand, gravel and terracotta stay;
+     * everything else turns to stone. Netty-safe, cached per global id.
+     */
+    static int terrainTop(int globalId) {
+        if (globalId <= 0) return -2;
+        if (globalId < TERRAIN_TOP.length) {
+            int c = TERRAIN_TOP[globalId];
+            if (c != -1) return c;
+        }
+        int out = computeTerrainTop(globalId);
+        if (globalId < TERRAIN_TOP.length) TERRAIN_TOP[globalId] = out;
+        return out;
+    }
+
+    private static int computeTerrainTop(int globalId) {
+        StateType type;
+        try {
+            WrappedBlockState st = WrappedBlockState.getByGlobalId(globalId, false);
+            type = st != null ? st.getType() : null;
+        } catch (Exception e) {
+            return -2;
+        }
+        if (type == null || type.isAir()) return -2;
+        String key = registryKey(type);
+        if (key == null) return -2;
+        boolean terracotta = key.equals("terracotta")
+                || (key.endsWith("_terracotta") && !key.endsWith("glazed_terracotta"));
+        boolean ground = terracotta || GROUND_TYPES.contains(type)
+                || key.equals("dirt_path") || key.equals("grass_path") || key.equals("rooted_dirt")
+                || key.equals("suspicious_sand") || key.equals("suspicious_gravel");
+        if (!ground) return -2;
+        if (terracotta || type == StateTypes.SAND || type == StateTypes.RED_SAND || type == StateTypes.GRAVEL) {
+            return globalId;
+        }
+        if (key.equals("suspicious_sand")) { int id = stateId("sand"); if (id >= 0) return id; }
+        if (key.equals("suspicious_gravel")) { int id = stateId("gravel"); if (id >= 0) return id; }
+        if (type == StateTypes.GRASS_BLOCK || type == StateTypes.PODZOL || type == StateTypes.MYCELIUM
+                || type == StateTypes.FARMLAND || type == StateTypes.DIRT || type == StateTypes.COARSE_DIRT
+                || key.equals("dirt_path") || key.equals("grass_path") || key.equals("rooted_dirt")) {
+            int dirt = terrainDirtId();
+            if (dirt >= 0) return dirt;
+        }
+        int stone = terrainStoneId();
+        return stone >= 0 ? stone : -2;
+    }
+
     // ── Palette data structures ───────────────────────────────────────────
 
     /**
