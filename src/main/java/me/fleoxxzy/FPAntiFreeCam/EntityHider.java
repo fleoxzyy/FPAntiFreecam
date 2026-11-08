@@ -185,6 +185,10 @@ public final class EntityHider implements Listener {
         volatile boolean losActive;
         /** NEW: players can be hidden from this viewer (include-players on, locator bar off). */
         volatile boolean hidePlayers;
+        /** NEW (terrain protection): this viewer is sent a fake surface; anyone on it is hidden. */
+        volatile boolean terrainHide;
+        /** NEW (terrain protection): terrain state version seen by the last check. */
+        int terrainVersion;
         /** NEW: a block near this viewer was broken / moved after this time; cached hidden results are stale. */
         volatile long wallsOpenedAt;
         double[] lastCams;
@@ -358,7 +362,9 @@ public final class EntityHider implements Listener {
         // Players were never hidden in the zone before; they now are only
         // with include-players on and the locator bar off (same rule as check()).
         boolean hidePlayer = includePlayers && v.hidePlayers;
-        boolean hide = zoneHidden && (!isPlayer || hidePlayer);
+        // NEW (terrain protection): zoneHidden for a player is only ever set
+        // by ChunkListener for the faked surface, so it always counts.
+        boolean hide = zoneHidden && (!isPlayer || hidePlayer || v.terrainHide);
         if (!hide && v.losActive && (!isPlayer || hidePlayer)
                 && (typeKey == null || !neverHide.contains(typeKey))) {
             Long shown = v.shownAt.get(entityUuid);
@@ -482,7 +488,17 @@ public final class EntityHider implements Listener {
         v.worldId = world.getUID();
 
         boolean los = isLosActiveFor(player);
-        boolean zone = isZoneActiveFor(player);
+        // NEW (terrain protection): the fake surface started, ended or moved.
+        // Cached zone results are stale and a full scan runs now, so whoever
+        // is up there is hidden (or shown again) straight away.
+        int tv = plugin.getTerrainVersion(pid);
+        v.terrainHide = plugin.isTerrainProtected(pid);
+        if (tv != v.terrainVersion) {
+            v.terrainVersion = tv;
+            v.lastFullScan = 0;
+            for (Tracked t : v.tracked.values()) t.zoneAt = 0;
+        }
+        boolean zone = isZoneActiveFor(player) || v.terrainHide;
         v.losActive = los;
         if (!los && !zone) {
             // Feature off, bypass gained, or nothing to hide here: give back
@@ -531,6 +547,8 @@ public final class EntityHider implements Listener {
         // the edge flicker in and out of tracking.
         range = Math.min(range, maxTrack + 8.0);
         v.hidePlayers = includePlayers && !locatorBarOn(world);
+        // NEW (terrain protection): v.terrainHide (set above) also hides
+        // players, but only on the faked surface; line of sight never does.
         java.util.Collection<Entity> nearby;
         try {
             if (los) {
@@ -549,6 +567,8 @@ public final class EntityHider implements Listener {
                             pl0.getBlockX(), pl0.getBlockZ(), (int) range));
                 }
                 double top = Math.min(maxY, zoneTop + 2.0);
+                // NEW (terrain protection): everything on the faked surface can be hidden.
+                if (v.terrainHide) top = maxY;
                 if (top <= minY) {
                     release(player, v);
                     return;
@@ -570,7 +590,7 @@ public final class EntityHider implements Listener {
             // IMPROVEMENT: players that can't be hidden and aren't hidden now
             // need nothing at all, so they skip the rest (most of the cost
             // with many players close together).
-            if (!v.hidePlayers && e instanceof Player) {
+            if (!v.hidePlayers && !v.terrainHide && e instanceof Player) {
                 Tracked pt = v.tracked.get(e.getEntityId());
                 if (pt == null || pt.mode == SHOWN) continue;
             }
@@ -611,7 +631,12 @@ public final class EntityHider implements Listener {
             Location l = c.l;
             boolean hideable = !(e instanceof Player) || v.hidePlayers;
             boolean always, zoneHidden;
-            if (los) {
+            if (!hideable && v.terrainHide) {
+                // NEW (terrain protection): players are only hidden on the faked
+                // surface, not in the rest of the zone (include-players is off).
+                zoneHidden = terrainHidden(player, l) && !alwaysShow(player, v, t, e, ownRoot, now);
+                always = !zoneHidden;
+            } else if (los) {
                 // IMPROVEMENT: players that can't be hidden (include-players off,
                 // locator bar on) skip the always-show and hidden-zone checks.
                 always = !hideable || alwaysShow(player, v, t, e, ownRoot, now);
@@ -783,9 +808,19 @@ public final class EntityHider implements Listener {
 
     /** Chunk mode: still in the hidden zone and nothing makes it always shown. */
     private boolean keepHidden(Player player, View v, Tracked t, Entity e, World world, Entity ownRoot, long now) {
-        if (!e.getWorld().equals(world) || (t.isPlayer && !v.hidePlayers)) return false;
+        if (!e.getWorld().equals(world)) return false;
+        if (t.isPlayer && !v.hidePlayers) {
+            // NEW (terrain protection): see check().
+            return v.terrainHide && terrainHidden(player, e.getLocation()) && !alwaysShow(player, v, t, e, ownRoot, now);
+        }
         if (!zoneHidden(player, t, e.getLocation(), now)) return false;
         return !alwaysShow(player, v, t, e, ownRoot, now);
+    }
+
+    /** NEW (terrain protection): on the surface faked for this player. */
+    private boolean terrainHidden(Player player, Location l) {
+        return plugin.isTerrainHidden(player.getUniqueId(), player.getWorld().getUID(),
+                floor(l.getX()), floor(l.getY()), floor(l.getZ()));
     }
 
     /**
