@@ -4,7 +4,7 @@
 # ─────────────────────────────────────────────────────────────────────
 
 # Do not change this manually.
-config-version: 5.9
+config-version: 6.0
 
 # ── General ──────────────────────────────────────────────────────────
 settings:
@@ -94,11 +94,12 @@ protection:
   terrain-protection:
     enabled: true
 
-    # Blocks below the surface where the 3x3 chunks around you turn real.
-    reveal-3x3-depth: 16
+    # Climb above this Y and the 3x3 chunks around you turn real.
+    reveal-3x3-y: 50
 
-    # Blocks below the surface where everything turns real.
-    reveal-all-depth: 6
+    # Climb above this Y and everything turns real. Keep it under your
+    # lowest surface, or players walking around up there get cubes.
+    reveal-all-y: 60
 
 # ── What hidden blocks look like ─────────────────────────────────────
 replacement:
