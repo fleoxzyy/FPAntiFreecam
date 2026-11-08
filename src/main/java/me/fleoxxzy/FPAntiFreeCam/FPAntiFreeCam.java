@@ -251,6 +251,16 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private volatile int smartFillMinCover = 6;
 
     /**
+     * NEW (terrain protection): a player sealed in underground (no air path
+     * to the sky) gets a plain stone / dirt surface instead of the real one.
+     * Close to the surface the 3x3 chunks around them turn real first, then
+     * everything.
+     */
+    private volatile boolean terrainProtectionEnabled = true;
+    private volatile int terrainReveal3x3Depth = 16;
+    private volatile int terrainRevealAllDepth = 6;
+
+    /**
      * NEW: per-player last-checked-chunk tracking so Smart Fill can smoothly
      * refresh nearby chunks as a player walks toward (or descends into) a
      * previously camouflaged area, instead of the fake terrain only ever
@@ -666,6 +676,19 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         return smartFillFollowTerrain && world != null
                 && world.getEnvironment() == org.bukkit.World.Environment.NORMAL;
     }
+
+    /**
+     * NEW (terrain protection): applies in this world. Needs Smart Fill (its
+     * flood fill tells if the player is sealed in). Overworld only, same
+     * reason as follow-terrain. Netty-safe.
+     */
+    public boolean isTerrainProtectionWorld(org.bukkit.World world) {
+        return terrainProtectionEnabled && smartFillEnabled && world != null
+                && world.getEnvironment() == org.bukkit.World.Environment.NORMAL
+                && isWorldProtected(world.getName());
+    }
+    public int getTerrainReveal3x3Depth()           { return terrainReveal3x3Depth; }
+    public int getTerrainRevealAllDepth()           { return terrainRevealAllDepth; }
     public boolean isSmartFillAlwaysOn()            { return smartFillAlwaysOn; }
     public int     getSmartFillSurfaceStructureMinY()    { return smartFillSurfaceStructureMinY; }
     public int     getSmartFillMaxShallowPocketHeight()  { return smartFillMaxShallowPocketHeight; }
@@ -781,6 +804,13 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                     + "). Clamping to " + clamped);
             smartFillSurfaceStructureMinY = clamped;
         }
+
+        // NEW (terrain protection)
+        terrainProtectionEnabled = cfg.getBoolean("protection.terrain-protection.enabled", true);
+        terrainReveal3x3Depth = Math.max(2, Math.min(64,
+                cfg.getInt("protection.terrain-protection.reveal-3x3-depth", 16)));
+        terrainRevealAllDepth = Math.max(0, Math.min(terrainReveal3x3Depth,
+                cfg.getInt("protection.terrain-protection.reveal-all-depth", 6)));
 
         if (smartFillReveal != null) smartFillReveal.loadSettings();
 

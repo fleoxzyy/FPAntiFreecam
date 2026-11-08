@@ -90,6 +90,8 @@ public final class SmartFillReveal implements Listener {
     // ── Connected-air flood fill ─────────────────────────────────────────
     /** Cells read per flood fill. Past this the rest of reveal-radius falls back to the sphere. */
     private static final int FILL_BUDGET = 40_000;
+    /** NEW (terrain protection): blocks read walking up to the sky per fill. Past this it counts as open. */
+    private static final int SKY_READ_BUDGET = 20_000;
     /** Re-fill once the eye moved this far (squared, in blocks). */
     private static final int FILL_MOVE_THRESHOLD_SQ = 2 * 2;
     /** Same, for a fill that ran out of budget (whole sphere revealed). */
@@ -118,6 +120,10 @@ public final class SmartFillReveal implements Listener {
         final long computedAt;
         /** Feet cell (second seed, near radius). Only used to share fills. */
         int fx, fy, fz;
+        // NEW (terrain protection): the fill reached open sky (or wasn't
+        // checked), and the highest air cell it reached.
+        boolean skyOpen = true;
+        int topY = Integer.MIN_VALUE;
 
         Fill(LongSet cells, LongSet sphereChunks, boolean sphereAll, UUID worldId,
              int ox, int oy, int oz, long computedAt) {
@@ -363,7 +369,8 @@ public final class SmartFillReveal implements Listener {
                 int fx = feet.getBlockX(), fy = feet.getBlockY(), fz = feet.getBlockZ();
                 next = sharedFill(s, world.getUID(), ex, ey, ez, fx, fy, fz, now);
                 if (next == null) {
-                    next = computeFill(world, ex, ey, ez, fx, fy, fz, now, ceilingY);
+                    next = computeFill(world, ex, ey, ez, fx, fy, fz, now, ceilingY,
+                            plugin.isTerrainProtectionWorld(world));
                     next.fx = fx; next.fy = fy; next.fz = fz;
                 }
             }
@@ -397,7 +404,8 @@ public final class SmartFillReveal implements Listener {
         return null;
     }
 
-    private Fill computeFill(World world, int ox, int oy, int oz, int px, int py, int pz, long now, int areaTop) {
+    private Fill computeFill(World world, int ox, int oy, int oz, int px, int py, int pz, long now, int areaTop,
+                             boolean checkSky) {
         final int R = revealRadius, RS = R * R, D = 2 * R + 1;
         final int minY = world.getMinHeight(), maxY = world.getMaxHeight();
         final int ceilingY = plugin.getSmartFillCeilingY();
@@ -426,6 +434,14 @@ public final class SmartFillReveal implements Listener {
         Object level = FastBlockReader.AVAILABLE ? FastBlockReader.level(world) : null;
         Object[] chunks = level != null ? new Object[9 * 9] : null;
         LongSet sphereChunks = null;
+        // NEW (terrain protection): per-column surface height, read on first use.
+        int[] skyY = null;
+        boolean skySeen = false;
+        if (checkSky) {
+            skyY = buf.skyY;
+            if (skyY.length < D * D) buf.skyY = skyY = new int[D * D];
+            Arrays.fill(skyY, 0, D * D, Integer.MIN_VALUE);
+        }
 
         // Seeds: eye and feet cell, whatever they are.
         int[] seeds = { 0, 0, 0, px - ox, py - oy, pz - oz };
@@ -463,12 +479,20 @@ public final class SmartFillReveal implements Listener {
                 // follow-terrain the band ends at each column's own top.
                 int x = ox + dx, z = oz + dz;
                 int ci = ((x >> 4) - ccx0) * 9 + ((z >> 4) - ccz0);
+                boolean aboveBand = false;
                 if (y > ceilingY + 2 && y > oy) {
-                    if (cover == null) continue;
-                    // IMPROVEMENT: the chunk's tops are looked up once per fill, not per cell.
-                    short[] t = coverTops[ci];
-                    if (t == null) coverTops[ci] = t = cover.columnTops(x, z);
-                    if (t.length == 0 || y > t[((z & 15) << 4) | (x & 15)] + 2) continue;
+                    if (cover == null) {
+                        aboveBand = true;
+                    } else {
+                        // IMPROVEMENT: the chunk's tops are looked up once per fill, not per cell.
+                        short[] t = coverTops[ci];
+                        if (t == null) coverTops[ci] = t = cover.columnTops(x, z);
+                        if (t.length == 0 || y > t[((z & 15) << 4) | (x & 15)] + 2) aboveBand = true;
+                    }
+                    // NEW (terrain protection): air up there is still followed
+                    // until it reaches the sky, so a tunnel that winds up to
+                    // the surface counts as open. Nothing up there is revealed.
+                    if (aboveBand && (!checkSky || skySeen)) continue;
                 }
                 int idx = ((dx + R) * D + (dy + R)) * D + (dz + R);
                 if ((visited[idx >>> 6] & (1L << idx)) != 0) continue;
@@ -520,7 +544,61 @@ public final class SmartFillReveal implements Listener {
                         blocks = false; // unsure: treat as open, reveals more
                     }
                 }
-                if (!blocks) queue[tail++] = pack(dx, dy, dz);
+                if (!blocks) {
+                    queue[tail++] = pack(dx, dy, dz);
+                    if (checkSky && !skySeen && y > highestAt(world, skyY, (dx + R) * D + (dz + R), x, z)) {
+                        skySeen = true;
+                    }
+                }
+            }
+        }
+
+        // NEW (terrain protection): walk up from the top reached cell of every
+        // column. A column is open if nothing that stops sight sits between
+        // it and the sky. Budget hit, a full sphere or an unreadable chunk
+        // counts as open, so the real surface is sent when unsure.
+        boolean skyOpen = true;
+        int airTop = Integer.MIN_VALUE;
+        if (checkSky && !sphereAll && !skySeen && tail > 0) {
+            int[] colTop = buf.colTop;
+            if (colTop.length < D * D) buf.colTop = colTop = new int[D * D];
+            Arrays.fill(colTop, 0, D * D, Integer.MIN_VALUE);
+            for (int i = 0; i < tail; i++) {
+                int c = queue[i];
+                int ci2 = (unpackX(c) + R) * D + (unpackZ(c) + R);
+                int y = oy + unpackY(c);
+                if (y > colTop[ci2]) colTop[ci2] = y;
+                if (y > airTop) airTop = y;
+            }
+            skyOpen = false;
+            int reads = SKY_READ_BUDGET;
+            columns:
+            for (int ci2 = 0; ci2 < D * D; ci2++) {
+                if (colTop[ci2] == Integer.MIN_VALUE) continue;
+                int x = ox + ci2 / D - R, z = oz + ci2 % D - R;
+                int ci = ((x >> 4) - ccx0) * 9 + ((z >> 4) - ccz0);
+                int top = highestAt(world, skyY, ci2, x, z);
+                for (int y = colTop[ci2] + 1; ; y++) {
+                    if (y > top) { skyOpen = true; break columns; }
+                    if (y >= maxY || --reads < 0) { skyOpen = true; break columns; }
+                    if (level != null) {
+                        try {
+                            Object state = FastBlockReader.state(chunks[ci], x, y, z);
+                            int known = FastBlockReader.cached(state);
+                            if (known == 1) break;
+                            if (known < 0) {
+                                boolean b = SightRaycaster.blocksSight(world.getType(x, y, z));
+                                FastBlockReader.remember(state, b);
+                                if (b) break;
+                            }
+                        } catch (Throwable e) {
+                            skyOpen = true;
+                            break columns;
+                        }
+                    } else if (SightRaycaster.blocksSight(world.getType(x, y, z))) {
+                        break;
+                    }
+                }
             }
         }
 
@@ -571,8 +649,40 @@ public final class SmartFillReveal implements Listener {
             }
         }
 
-        return new Fill(cells, sphereChunks != null ? sphereChunks : LongSet.EMPTY, sphereAll,
-                world.getUID(), ox, oy, oz, now);
+        return finish(new Fill(cells, sphereChunks != null ? sphereChunks : LongSet.EMPTY, sphereAll,
+                world.getUID(), ox, oy, oz, now), skyOpen || sphereChunks != null, airTop);
+    }
+
+    private static Fill finish(Fill f, boolean skyOpen, int airTop) {
+        f.skyOpen = skyOpen;
+        f.topY = airTop;
+        return f;
+    }
+
+    /** Surface height of a fill column (heightmap), cached per fill. */
+    private static int highestAt(World world, int[] skyY, int col, int x, int z) {
+        int h = skyY[col];
+        if (h == Integer.MIN_VALUE) {
+            try {
+                h = world.getHighestBlockYAt(x, z);
+            } catch (Exception e) {
+                h = Integer.MIN_VALUE + 1; // unreadable: counts as open
+            }
+            skyY[col] = h;
+        }
+        return h;
+    }
+
+    /**
+     * NEW (terrain protection): highest air block the player's current fill
+     * reached, or Integer.MIN_VALUE if the player isn't sealed in (no fill
+     * yet, other world, open sky, or the fill ran out of budget). Any thread.
+     */
+    public int enclosedAirTop(UUID playerId, UUID worldId) {
+        State s = states.get(playerId);
+        Fill f = s != null ? s.fill : null;
+        if (f == null || f.skyOpen || f.sphereAll || !f.worldId.equals(worldId)) return Integer.MIN_VALUE;
+        return f.topY;
     }
 
     /** Highest reveal top of chunk (cx, cz), from the fill's per-chunk cache. */
@@ -601,6 +711,8 @@ public final class SmartFillReveal implements Listener {
     private static final class Buffers {
         long[] visited = new long[0];
         final int[] queue = new int[FILL_BUDGET + 2];
+        int[] colTop = new int[0];
+        int[] skyY = new int[0];
     }
     private final ThreadLocal<Buffers> buffers = ThreadLocal.withInitial(Buffers::new);
 
