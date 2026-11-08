@@ -175,8 +175,9 @@ protection:
     # Blocks checked per player per second. Lower = less server time.
     reveal-sight-budget: 60000
 
-  # Sealed in a cave with no way up? The surface is sent as plain
-  # stone and dirt, so freecam shows nothing real up there.
+  # Join while sealed in a cave with no way up and each surface chunk
+  # is sent as one flat block of stone with grass, sand etc. on top,
+  # so freecam shows nothing real up there. Only checked on join.
   # Needs Smart Fill. Overworld only.
   terrain-protection:
     enabled: true
