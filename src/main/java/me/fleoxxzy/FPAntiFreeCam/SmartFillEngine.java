@@ -380,9 +380,9 @@ public final class SmartFillEngine {
     /**
      * NEW (terrain protection): the block a chunk's cube top shows as, or -2
      * if this block isn't natural ground. Grass, podzol, mycelium, farmland
-     * and paths turn to grass; dirt stays dirt; sand, red sand, gravel, snow
-     * and terracotta stay; everything else turns to stone. Netty-safe,
-     * cached per global id.
+     * and paths turn to grass; dirt stays dirt; sand, red sand, gravel, snow,
+     * clay, mud and terracotta stay; everything else turns to stone.
+     * Netty-safe, cached per global id.
      */
     static int terrainTop(int globalId) {
         if (globalId <= 0) return -2;
@@ -393,6 +393,33 @@ public final class SmartFillEngine {
         int out = computeTerrainTop(globalId);
         if (globalId < TERRAIN_TOP.length) TERRAIN_TOP[globalId] = out;
         return out;
+    }
+
+    /** Per global id: 0 unknown, 1 water, 2 not water. Racy writes are harmless. */
+    private static final byte[] TERRAIN_WATER = new byte[1 << 16];
+
+    /**
+     * NEW (terrain protection): water, or a plant / bubble column that only
+     * grows in it. A column with this above its ground is a river or sea
+     * bed. Netty-safe, cached per global id.
+     */
+    static boolean isTerrainWater(int globalId) {
+        if (globalId <= 0) return false;
+        if (globalId < TERRAIN_WATER.length) {
+            byte c = TERRAIN_WATER[globalId];
+            if (c != 0) return c == 1;
+        }
+        boolean water;
+        try {
+            WrappedBlockState st = WrappedBlockState.getByGlobalId(globalId, false);
+            StateType t = st != null ? st.getType() : null;
+            water = t == StateTypes.WATER || t == StateTypes.BUBBLE_COLUMN || t == StateTypes.KELP
+                    || t == StateTypes.KELP_PLANT || t == StateTypes.SEAGRASS || t == StateTypes.TALL_SEAGRASS;
+        } catch (Exception e) {
+            water = false;
+        }
+        if (globalId < TERRAIN_WATER.length) TERRAIN_WATER[globalId] = (byte) (water ? 1 : 2);
+        return water;
     }
 
     private static int computeTerrainTop(int globalId) {
@@ -413,7 +440,7 @@ public final class SmartFillEngine {
                 || key.equals("suspicious_sand") || key.equals("suspicious_gravel");
         if (!ground) return -2;
         if (terracotta || type == StateTypes.SAND || type == StateTypes.RED_SAND || type == StateTypes.GRAVEL
-                || type == StateTypes.SNOW_BLOCK) {
+                || type == StateTypes.SNOW_BLOCK || type == StateTypes.CLAY || type == StateTypes.MUD) {
             return globalId;
         }
         if (key.equals("suspicious_sand")) { int id = stateId("sand"); if (id >= 0) return id; }
