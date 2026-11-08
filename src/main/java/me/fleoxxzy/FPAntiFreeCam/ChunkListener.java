@@ -917,11 +917,16 @@ public final class ChunkListener implements PacketListener {
                 }
             }
         }
-        int topId = 0; // no ground above the floor: just air over it
+        // No ground above the floor (sea or river bed lower than the floor):
+        // a one-block stone lid, so the real water and bed under the floor
+        // never show through.
+        int topId = stone;
         if (n > 0) {
             int best = 0;
             for (int k = 1; k < n; k++) if (counts[k] > counts[best]) best = k;
             topId = kinds[best];
+        } else {
+            top = floor + 1;
         }
 
         boolean[] dirty = new boolean[sections.length];
