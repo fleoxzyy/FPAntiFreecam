@@ -342,6 +342,7 @@ public final class ChunkListener implements PacketListener {
         if (type == PacketType.Play.Server.RESPAWN || type == PacketType.Play.Server.JOIN_GAME) {
             maskedChunks.remove(uuid); // client drops every chunk on respawn/world change
             flatMaskedChunks.remove(uuid);
+            plugin.forgetTerrainProtection(uuid); // NEW (terrain protection): worked out again at the new spot
             if (hider != null) hider.onClientReset(uuid); // and every entity
             AntiXrayEngine xray = plugin.getAntiXrayEngine();
             if (xray != null) xray.cleanupPlayer(uuid); // hidden ores and reveals went with those chunks
@@ -404,7 +405,7 @@ public final class ChunkListener implements PacketListener {
             if (xrayActive) {
                 handleBlockPacket(event, player, type, true);
             } else if (type == PacketType.Play.Server.CHUNK_DATA) {
-                handleChunkData(event, player);
+                handleChunkFreecam(event, player);
             } else if (type == PacketType.Play.Server.BLOCK_CHANGE) {
                 handleBlockChange(event, player);
             } else {
@@ -469,7 +470,7 @@ public final class ChunkListener implements PacketListener {
         try {
             if (type == PacketType.Play.Server.CHUNK_DATA) {
                 freecamDone = true; // set first: the handler itself must not run twice
-                if (freecamPass) handleChunkData(event, player);
+                if (freecamPass) handleChunkFreecam(event, player);
                 WrapperPlayServerChunkData wrapper = new WrapperPlayServerChunkData(event);
                 Column column = wrapper.getColumn();
                 BaseChunk[] sections = column != null ? column.getChunks() : null;
@@ -526,7 +527,7 @@ public final class ChunkListener implements PacketListener {
         } catch (Exception e) {
             plugin.dbg("Anti-Xray " + type + " error for " + player.getName() + ": " + e.getMessage());
             if (!freecamDone) {
-                if (type == PacketType.Play.Server.CHUNK_DATA) handleChunkData(event, player);
+                if (type == PacketType.Play.Server.CHUNK_DATA) handleChunkFreecam(event, player);
                 else if (type == PacketType.Play.Server.BLOCK_CHANGE) handleBlockChange(event, player);
                 else handleMultiBlockChange(event, player);
             }
@@ -829,6 +830,202 @@ public final class ChunkListener implements PacketListener {
             plugin.addBlocksReplaced(replacedCount);
             plugin.dbg("CHUNK_DATA modified for " + player.getName()
                     + " (" + replacedCount + " blocks, smart-fill, tile entities stripped)");
+        }
+    }
+
+    // ── Terrain protection (NEW) ──────────────────────────────────────────
+
+    /** NEW (terrain protection): the freecam pass for a chunk: void-y / Smart Fill, then the fake surface. */
+    private void handleChunkFreecam(PacketSendEvent event, Player player) {
+        handleChunkData(event, player);
+        try {
+            applyTerrainProtection(event, player);
+        } catch (Exception e) {
+            plugin.dbg("Terrain protection chunk error for " + player.getName() + ": " + e.getMessage());
+        }
+    }
+
+    /**
+     * NEW (terrain protection): the player is sealed in underground, so
+     * everything above the fake floor is rebuilt as plain ground at the real
+     * heights: the top block simplified (SmartFillEngine#terrainTop), stone
+     * under it, air above. Builds, trees, water and block entities are gone,
+     * and light and heightmaps match the fake blocks.
+     */
+    private void applyTerrainProtection(PacketSendEvent event, Player player) {
+        UUID id = player.getUniqueId();
+        if (!plugin.isTerrainProtected(id)) return;
+        World world = player.getWorld();
+        if (world == null) return;
+        WrapperPlayServerChunkData wrapper = new WrapperPlayServerChunkData(event);
+        Column column = wrapper.getColumn();
+        BaseChunk[] sections = column != null ? column.getChunks() : null;
+        if (sections == null) return;
+        int cx = column.getX(), cz = column.getZ();
+        int floor = plugin.terrainFloor(id, world.getUID(), cx, cz);
+        if (floor == Integer.MIN_VALUE) return;
+        int minY = world.getMinHeight();
+        int height = sections.length * 16;
+        if (floor >= minY + height - 1) return;
+        int stone = SmartFillEngine.terrainStoneId();
+        if (stone < 0) return;
+
+        // Ground per column: highest natural ground block above the floor.
+        int[] ground = new int[256];
+        int[] topIds = new int[256];
+        int maxGround = floor;
+        for (int col = 0; col < 256; col++) {
+            int lx = col & 15, lz = col >> 4;
+            int g = floor, gid = -2;
+            scan:
+            for (int si = sections.length - 1; si >= 0; si--) {
+                int base = minY + (si << 4);
+                if (base + 15 <= floor) break;
+                BaseChunk s = sections[si];
+                if (s == null || s.isEmpty()) continue;
+                for (int ly = 15; ly >= 0; ly--) {
+                    int y = base + ly;
+                    if (y <= floor) break scan;
+                    int t = SmartFillEngine.terrainTop(s.getBlockId(lx, ly, lz));
+                    if (t != -2) { g = y; gid = t; break scan; }
+                }
+            }
+            ground[col] = g;
+            topIds[col] = gid;
+            if (g > maxGround) maxGround = g;
+        }
+
+        long[][] bits = new long[sections.length][];
+        long replaced = 0;
+        for (int si = 0; si < sections.length; si++) {
+            int base = minY + (si << 4);
+            if (base + 15 <= floor) continue;
+            BaseChunk s = sections[si];
+            if (s == null) continue;
+            if (s.isEmpty() && base > maxGround) continue; // all air already
+            for (int ly = 0; ly < 16; ly++) {
+                int y = base + ly;
+                if (y <= floor) continue;
+                for (int col = 0; col < 256; col++) {
+                    int g = ground[col];
+                    int want = y < g ? stone : y == g ? topIds[col] : 0;
+                    int lx = col & 15, lz = col >> 4;
+                    if (s.getBlockId(lx, ly, lz) == want) continue;
+                    s.set(lx, ly, lz, want);
+                    markReplaced(bits, si, lx, ly, lz);
+                    replaced++;
+                }
+            }
+        }
+        boolean tiles = stripTileEntitiesAbove(column, floor);
+        if (replaced == 0 && !tiles) return;
+
+        boolean[] dirty = new boolean[sections.length];
+        for (int si = 0; si < sections.length; si++) dirty[si] = bits[si] != null;
+        normalizeSections(sections, dirty);
+        try {
+            relightTerrain(wrapper.getLightData(), minY, floor, ground);
+        } catch (Exception e) {
+            plugin.dbg("Terrain protection light error: " + e.getMessage());
+        }
+        rewriteHeightmaps(column, minY, height, ground);
+        try { wrapper.setIgnoreOldData(true); } catch (Exception ignored) {}
+        event.markForReEncode(true);
+        plugin.incrementChunksModified();
+        plugin.addBlocksReplaced(replaced);
+        plugin.dbg("CHUNK_DATA " + cx + "," + cz + " terrain protection for " + player.getName()
+                + " (" + replaced + " blocks, floor Y=" + floor + ")");
+    }
+
+    private boolean stripTileEntitiesAbove(Column column, int floor) {
+        try {
+            TileEntity[] tes = column.getTileEntities();
+            if (tes == null || tes.length == 0 || TILE_ENTITIES_FIELD == null) return false;
+            List<TileEntity> kept = new ArrayList<>(tes.length);
+            for (TileEntity te : tes) {
+                if (te != null && te.getY() > floor) continue;
+                kept.add(te);
+            }
+            if (kept.size() == tes.length) return false;
+            TILE_ENTITIES_FIELD.set(column, kept.toArray(new TileEntity[0]));
+            return true;
+        } catch (Exception e) {
+            plugin.dbg("Terrain protection tile entity strip error: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Above the floor: no block light, full sky light over the ground, none in it. */
+    private static void relightTerrain(LightData light, int minY, int floor, int[] ground) {
+        if (light == null) return;
+        relight(light.getBlockLightMask(), light.getBlockLightArray(), minY, floor, ground, false);
+        relight(light.getSkyLightMask(), light.getSkyLightArray(), minY, floor, ground, true);
+    }
+
+    private static void relight(BitSet mask, byte[][] arrays, int minY, int floor, int[] ground, boolean sky) {
+        if (mask == null || arrays == null) return;
+        int slot = 0;
+        for (int li = mask.nextSetBit(0); li >= 0 && slot < arrays.length; li = mask.nextSetBit(li + 1), slot++) {
+            int base = minY + ((li - 1) << 4); // light index 0 is the section below the world
+            if (base + 15 <= floor) continue;
+            byte[] nib = arrays[slot];
+            if (nib == null || nib.length < 2048) continue;
+            byte[] out = null;
+            for (int ly = 0; ly < 16; ly++) {
+                int y = base + ly;
+                if (y <= floor) continue;
+                for (int col = 0; col < 256; col++) {
+                    int want = sky && y > ground[col] ? 15 : 0;
+                    int i = (ly << 8) | col;
+                    byte cur = (out != null ? out : nib)[i >> 1];
+                    int have = (i & 1) == 0 ? cur & 0x0F : (cur >> 4) & 0x0F;
+                    if (have == want) continue;
+                    if (out == null) out = nib.clone(); // may be shared with other viewers
+                    out[i >> 1] = (byte) ((i & 1) == 0 ? (cur & 0xF0) | want : (cur & 0x0F) | (want << 4));
+                }
+            }
+            if (out != null) arrays[slot] = out;
+        }
+    }
+
+    private static final String[] TERRAIN_HEIGHTMAPS = { "WORLD_SURFACE", "MOTION_BLOCKING", "MOTION_BLOCKING_NO_LEAVES" };
+
+    /**
+     * Heightmaps to the fake ground, or rain and snow would still stop at
+     * the removed trees and roofs. Arrays of an unexpected size are left alone.
+     */
+    private void rewriteHeightmaps(Column column, int minY, int height, int[] ground) {
+        try {
+            if (!column.hasHeightMaps()) return;
+            int bits = 32 - Integer.numberOfLeadingZeros(height);
+            int per = 64 / bits;
+            int len = (256 + per - 1) / per;
+            long mask = (1L << bits) - 1;
+            long[] packed = new long[len];
+            for (int col = 0; col < 256; col++) {
+                long v = Math.max(0, Math.min(height, ground[col] + 1 - minY));
+                packed[col / per] |= (v & mask) << ((col % per) * bits);
+            }
+            Map<com.github.retrooper.packetevents.protocol.world.chunk.HeightmapType, long[]> map = column.getHeightmaps();
+            if (map != null) {
+                for (Map.Entry<com.github.retrooper.packetevents.protocol.world.chunk.HeightmapType, long[]> e : map.entrySet()) {
+                    String key = e.getKey().getSerializationKey();
+                    if (e.getValue() == null || e.getValue().length != len) continue;
+                    for (String k : TERRAIN_HEIGHTMAPS) if (k.equals(key)) { e.setValue(packed.clone()); break; }
+                }
+            }
+            com.github.retrooper.packetevents.protocol.nbt.NBTCompound nbt = column.getHeightMaps();
+            if (nbt != null) {
+                for (String k : TERRAIN_HEIGHTMAPS) {
+                    com.github.retrooper.packetevents.protocol.nbt.NBTLongArray t = nbt.getTagOfTypeOrNull(k,
+                            com.github.retrooper.packetevents.protocol.nbt.NBTLongArray.class);
+                    if (t != null && t.getValue() != null && t.getValue().length == len) {
+                        nbt.setTag(k, new com.github.retrooper.packetevents.protocol.nbt.NBTLongArray(packed.clone()));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            plugin.dbg("Terrain protection heightmap error: " + e.getMessage());
         }
     }
 
