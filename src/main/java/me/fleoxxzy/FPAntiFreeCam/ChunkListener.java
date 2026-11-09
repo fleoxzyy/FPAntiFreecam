@@ -334,7 +334,8 @@ public final class ChunkListener implements PacketListener {
                 WrapperPlayServerUnloadChunk unload = new WrapperPlayServerUnloadChunk(event);
                 forgetChunk(uuid, unload.getChunkX(), unload.getChunkZ());
                 forgetFlatMasked(uuid, unload.getChunkX(), unload.getChunkZ());
-                forgetTerrainGround(uuid, unload.getChunkX(), unload.getChunkZ());
+                TerrainProtection tp = plugin.getTerrainProtection();
+                if (tp != null) tp.forgetChunk(uuid, unload.getChunkX(), unload.getChunkZ());
                 AntiXrayEngine xray = plugin.getAntiXrayEngine();
                 if (xray != null) xray.forgetChunk(uuid, unload.getChunkX(), unload.getChunkZ());
             } catch (Exception ignored) {}
@@ -343,7 +344,6 @@ public final class ChunkListener implements PacketListener {
         if (type == PacketType.Play.Server.RESPAWN || type == PacketType.Play.Server.JOIN_GAME) {
             maskedChunks.remove(uuid); // client drops every chunk on respawn/world change
             flatMaskedChunks.remove(uuid);
-            terrainGrounds.remove(uuid);
             plugin.forgetTerrainProtection(uuid); // NEW (terrain protection): worked out again at the new spot
             if (hider != null) hider.onClientReset(uuid); // and every entity
             AntiXrayEngine xray = plugin.getAntiXrayEngine();
@@ -854,74 +854,83 @@ public final class ChunkListener implements PacketListener {
 
     /**
      * NEW (terrain protection): the player is sealed in underground, so
-     * every chunk above the fake floor becomes one flat cube: stone up to
-     * the chunk's highest natural ground, topped with that block simplified
-     * (SmartFillEngine#terrainTop), air above. Builds, trees, water and
-     * block entities are gone, and light and heightmaps match the cube.
-     * Sections that end up all stone or all air are swapped as a whole;
-     * only the floor and top sections are set block by block.
+     * every surface chunk becomes one cube: stone up to the chunk's highest
+     * natural ground, topped with its most common surface block simplified
+     * (SmartFillEngine#terrainTop), air above. The fake floor under the cube
+     * follows the chunk's own ground (TerrainProtection#SURFACE_DEPTH under
+     * its low columns), so cubes follow the terrain and there is no flat
+     * stone layer underground. Builds, trees, water and block entities are
+     * gone, and light and heightmaps match the cube. Sections that end up
+     * all stone or all air are swapped as a whole; only the floor and top
+     * sections are set block by block.
      */
     private void applyTerrainProtection(PacketSendEvent event, Player player) {
         UUID id = player.getUniqueId();
-        if (!plugin.isTerrainProtected(id)) {
-            terrainGrounds.remove(id);
-            return;
-        }
+        TerrainProtection tp = plugin.getTerrainProtection();
         World world = player.getWorld();
-        if (world == null) return;
+        if (tp == null || world == null) return;
+        TerrainProtection.State state = tp.stateFor(id, world.getUID());
+        if (state == null) return;
         WrapperPlayServerChunkData wrapper = new WrapperPlayServerChunkData(event);
         Column column = wrapper.getColumn();
         BaseChunk[] sections = column != null ? column.getChunks() : null;
         if (sections == null) return;
         int cx = column.getX(), cz = column.getZ();
-        int floor = plugin.terrainFloor(id, world.getUID(), cx, cz);
-        if (floor == Integer.MIN_VALUE) {
-            forgetTerrainGround(id, cx, cz); // sent real now
+        if (state.isReal(cx, cz)) {
+            tp.forgetChunk(id, cx, cz); // sent real now
             return;
         }
         int minY = world.getMinHeight();
         int height = sections.length * 16;
-        if (floor >= minY + height - 2) return;
         int stone = SmartFillEngine.terrainStoneId();
         if (stone < 0) return;
 
-        // Ground per column: the highest natural ground above the floor.
-        // Water, seagrass and kelp aren't ground, so they turn to air like
-        // everything else that isn't. The cube sits at the highest ground,
-        // topped with the most common surface block of the chunk.
-        int top = floor;
+        // Ground per column: the highest natural ground. Water, seagrass and
+        // kelp aren't ground, so they turn to air like everything else that
+        // isn't. The cube sits at the highest ground, topped with the most
+        // common surface block of the chunk.
+        int[] heights = new int[256];
+        int cols = 0, top = Integer.MIN_VALUE;
         int[] kinds = new int[8], counts = new int[8];
         int n = 0;
         for (int col = 0; col < 256; col++) {
             int lx = col & 15, lz = col >> 4;
             scan:
             for (int si = sections.length - 1; si >= 0; si--) {
-                int base = minY + (si << 4);
-                if (base + 15 <= floor) break;
                 BaseChunk s = sections[si];
                 if (s == null || s.isEmpty()) continue;
+                int base = minY + (si << 4);
                 for (int ly = 15; ly >= 0; ly--) {
-                    int y = base + ly;
-                    if (y <= floor) break scan;
                     int t = SmartFillEngine.terrainTop(s.getBlockId(lx, ly, lz));
                     if (t == -2) continue;
+                    int y = base + ly;
+                    heights[cols++] = y;
                     if (y > top) top = y;
                     int k = 0;
                     while (k < n && kinds[k] != t) k++;
-                    if (k == n) {
-                        if (n == kinds.length) break scan;
-                        kinds[n] = t; counts[n++] = 0;
+                    if (k < n || n < kinds.length) {
+                        if (k == n) { kinds[n] = t; counts[n++] = 0; }
+                        counts[k]++;
                     }
-                    counts[k]++;
                     break scan;
                 }
             }
         }
-        // No ground above the floor (sea or river bed lower than the floor):
-        // a one-block stone lid, so the real water and bed under the floor
-        // never show through.
+        // Low end of the chunk's ground, skipping the lowest eighth so one
+        // cave mouth or well doesn't drag the floor down.
+        int groundFloor = Integer.MIN_VALUE;
+        if (cols > 0) {
+            Arrays.sort(heights, 0, cols);
+            groundFloor = heights[cols >> 3] - TerrainProtection.SURFACE_DEPTH;
+        }
+        int floor = state.floorFor(cx, cz, groundFloor);
+        if (floor < minY - 1) floor = minY - 1;
+        if (floor >= minY + height - 2) return;
+        // No ground above the floor (the player's air reaches past it, or
+        // the chunk has none): a one-block stone lid, so the real surface
+        // under the floor never shows. Trees, builds and water above go.
         int topId = stone;
-        if (n > 0) {
+        if (top > floor && n > 0) {
             int best = 0;
             for (int k = 1; k < n; k++) if (counts[k] > counts[best]) best = k;
             topId = kinds[best];
@@ -963,7 +972,7 @@ public final class ChunkListener implements PacketListener {
         int[] ground = new int[256];
         Arrays.fill(ground, top);
         boolean tiles = stripTileEntitiesAbove(column, floor);
-        terrainGrounds.computeIfAbsent(id, k -> new ConcurrentHashMap<>()).put(columnKey(cx, cz), ground);
+        tp.remember(id, cx, cz, floor, top);
         if (replaced == 0 && !tiles) return;
 
         normalizeSections(sections, dirty);
@@ -1014,19 +1023,6 @@ public final class ChunkListener implements PacketListener {
     }
 
     private static final int[] NO_GROUND = new int[256];
-
-    /** NEW (terrain protection): ground heights of the chunks we faked, per player, for light updates. */
-    private final Map<UUID, Map<Long, int[]>> terrainGrounds = new ConcurrentHashMap<>();
-
-    private int[] terrainGround(UUID id, int cx, int cz) {
-        Map<Long, int[]> m = terrainGrounds.get(id);
-        return m != null ? m.get(columnKey(cx, cz)) : null;
-    }
-
-    private void forgetTerrainGround(UUID id, int cx, int cz) {
-        Map<Long, int[]> m = terrainGrounds.get(id);
-        if (m != null) m.remove(columnKey(cx, cz));
-    }
 
     private static void relight(BitSet mask, byte[][] arrays, int minY, int floor, int[] ground, boolean sky) {
         if (mask == null || arrays == null) return;
@@ -1300,7 +1296,13 @@ public final class ChunkListener implements PacketListener {
             int terrainFloor = plugin.terrainFloor(player.getUniqueId(), player.getWorld().getUID(),
                     wrapper.getX(), wrapper.getZ());
             if (terrainFloor != Integer.MIN_VALUE && wrapper.getLightData() != null) {
-                int[] ground = terrainGround(player.getUniqueId(), wrapper.getX(), wrapper.getZ());
+                TerrainProtection tp = plugin.getTerrainProtection();
+                TerrainProtection.Faked f = tp != null ? tp.faked(player.getUniqueId(), wrapper.getX(), wrapper.getZ()) : null;
+                int[] ground = null;
+                if (f != null) {
+                    ground = new int[256];
+                    Arrays.fill(ground, f.top);
+                }
                 // Not faked by us yet: only the block light can be cleared safely.
                 relightTerrain(wrapper.getLightData(), player.getWorld().getMinHeight(), terrainFloor,
                         ground != null ? ground : NO_GROUND, ground != null);
@@ -2280,7 +2282,6 @@ public final class ChunkListener implements PacketListener {
     public void cleanupPlayer(UUID id) {
         maskedChunks.remove(id);
         flatMaskedChunks.remove(id);
-        terrainGrounds.remove(id);
     }
 
     /** NEW: Smart Fill palette cache (follow-terrain lookups from the reveal side). */

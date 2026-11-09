@@ -130,6 +130,10 @@ public final class SmartFillReveal implements Listener {
         boolean skyOpen = true;
         boolean skyChecked;
         int topY = Integer.MIN_VALUE;
+        // Highest reached air per chunk, 9x9 window from chunk (ccx0, ccz0).
+        // Lets the fake floor follow where the player can actually get to.
+        int[] chunkAirTop;
+        int ccx0, ccz0;
 
         Fill(LongSet cells, LongSet sphereChunks, boolean sphereAll, UUID worldId,
              int ox, int oy, int oz, long computedAt) {
@@ -570,9 +574,14 @@ public final class SmartFillReveal implements Listener {
         // follow a player digging up without looking for the sky again.
         boolean skyOpen = true;
         int airTop = Integer.MIN_VALUE;
+        int[] chunkAir = new int[9 * 9];
+        Arrays.fill(chunkAir, Integer.MIN_VALUE);
         for (int i = 0; i < tail; i++) {
-            int y = oy + unpackY(queue[i]);
+            int c = queue[i];
+            int y = oy + unpackY(c);
             if (y > airTop) airTop = y;
+            int ci = (((ox + unpackX(c)) >> 4) - ccx0) * 9 + (((oz + unpackZ(c)) >> 4) - ccz0);
+            if (ci >= 0 && ci < chunkAir.length && y > chunkAir[ci]) chunkAir[ci] = y;
         }
         if (checkSky && !sphereAll && !skySeen && tail > 0) {
             int[] colTop = buf.colTop;
@@ -663,9 +672,13 @@ public final class SmartFillReveal implements Listener {
             }
         }
 
-        return finish(new Fill(cells, sphereChunks != null ? sphereChunks : LongSet.EMPTY, sphereAll,
+        Fill out = finish(new Fill(cells, sphereChunks != null ? sphereChunks : LongSet.EMPTY, sphereAll,
                 world.getUID(), ox, oy, oz, now), skyOpen || sphereChunks != null, airTop,
                 checkSky && sphereChunks == null); // unloaded chunks nearby: not an answer yet
+        out.chunkAirTop = chunkAir;
+        out.ccx0 = ccx0;
+        out.ccz0 = ccz0;
+        return out;
     }
 
     private static Fill finish(Fill f, boolean skyOpen, int airTop, boolean skyChecked) {
@@ -719,7 +732,26 @@ public final class SmartFillReveal implements Listener {
         return f.topY;
     }
 
-    /** Highest reveal top of chunk (cx, cz), from the fill's per-chunk cache. */
+    /**
+     * NEW (terrain protection): highest air the player's current fill reached
+     * in each chunk of a 9x9 window centred on (pcx, pcz), indexed
+     * (dx + 4) * 9 + (dz + 4). Integer.MIN_VALUE where it reached none. Null
+     * if the fill is unknown or ran out of budget. Any thread.
+     */
+    public int[] reachedAirTops(UUID playerId, UUID worldId, int pcx, int pcz) {
+        State s = states.get(playerId);
+        Fill f = s != null ? s.fill : null;
+        if (f == null || f.sphereAll || f.chunkAirTop == null || !f.worldId.equals(worldId)) return null;
+        int[] out = new int[81];
+        for (int dx = -4; dx <= 4; dx++) {
+            for (int dz = -4; dz <= 4; dz++) {
+                int ix = pcx + dx - f.ccx0, iz = pcz + dz - f.ccz0;
+                out[(dx + 4) * 9 + (dz + 4)] = ix >= 0 && iz >= 0 && ix < 9 && iz < 9
+                        ? f.chunkAirTop[ix * 9 + iz] : Integer.MIN_VALUE;
+            }
+        }
+        return out;
+    }
     private static int chunkTop(SmartFillEngine.CoverLookup cover, int[] tops, int bx, int bz, int cx, int cz) {
         int ix = cx - bx, iz = cz - bz;
         if (ix < 0 || iz < 0 || ix >= TOP_WINDOW || iz >= TOP_WINDOW) return cover.chunkTop(cx << 4, cz << 4);

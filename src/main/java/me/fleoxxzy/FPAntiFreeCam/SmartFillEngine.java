@@ -395,6 +395,25 @@ public final class SmartFillEngine {
         return out;
     }
 
+    private static boolean isTerracotta(String key) {
+        return key != null && (key.equals("terracotta")
+                || (key.endsWith("_terracotta") && !key.endsWith("glazed_terracotta")));
+    }
+
+    /**
+     * NEW (terrain protection): natural ground (what the cubes are built on
+     * and what the surface above a player is measured from). Builds, trees,
+     * plants, water and ice aren't. Any thread.
+     */
+    static boolean isGroundType(StateType type) {
+        if (type == null || type.isAir()) return false;
+        if (GROUND_TYPES.contains(type)) return true;
+        String key = registryKey(type);
+        if (key == null) return false;
+        return isTerracotta(key) || key.equals("dirt_path") || key.equals("grass_path")
+                || key.equals("rooted_dirt") || key.equals("suspicious_sand") || key.equals("suspicious_gravel");
+    }
+
     private static int computeTerrainTop(int globalId) {
         StateType type;
         try {
@@ -403,15 +422,10 @@ public final class SmartFillEngine {
         } catch (Exception e) {
             return -2;
         }
-        if (type == null || type.isAir()) return -2;
+        if (!isGroundType(type)) return -2;
         String key = registryKey(type);
-        if (key == null) return -2;
-        boolean terracotta = key.equals("terracotta")
-                || (key.endsWith("_terracotta") && !key.endsWith("glazed_terracotta"));
-        boolean ground = terracotta || GROUND_TYPES.contains(type)
-                || key.equals("dirt_path") || key.equals("grass_path") || key.equals("rooted_dirt")
-                || key.equals("suspicious_sand") || key.equals("suspicious_gravel");
-        if (!ground) return -2;
+        if (key == null) key = "";
+        boolean terracotta = isTerracotta(key);
         if (terracotta || type == StateTypes.SAND || type == StateTypes.RED_SAND || type == StateTypes.GRAVEL
                 || type == StateTypes.SNOW_BLOCK || type == StateTypes.CLAY || type == StateTypes.MUD) {
             return globalId;
