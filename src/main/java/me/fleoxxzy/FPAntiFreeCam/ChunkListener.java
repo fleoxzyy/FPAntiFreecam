@@ -1814,7 +1814,7 @@ public final class ChunkListener implements PacketListener {
             int[] cached = entityYCache.get(entityId);
             if (cached == null) return; // unknown entity, let it through
 
-            if (cancelIfHiddenHardFloor(event, player, cached[0], cached[1], cached[2])) {
+            if (cancelIfHiddenHardFloor(event, player, cached[0], cached[1], cached[2], false)) {
                 plugin.dbg("ENTITY_SOUND_EFFECT cancelled for entity #"
                         + entityId + " at Y=" + cached[1]
                         + " for " + player.getName());
@@ -2098,12 +2098,26 @@ public final class ChunkListener implements PacketListener {
      * alone, matching how hard-floor blocks are handled.
      */
     private boolean cancelIfHiddenHardFloor(PacketSendEvent event, Player player, int x, int y, int z) {
+        return cancelIfHiddenHardFloor(event, player, x, y, z, true);
+    }
+
+    private boolean cancelIfHiddenHardFloor(PacketSendEvent event, Player player, int x, int y, int z, boolean band) {
         // NEW (terrain protection): sounds, particles and effects on the faked surface.
         if (plugin.isTerrainHidden(player.getUniqueId(), player.getWorld().getUID(), x, y, z)) {
             event.setCancelled(true);
             return true;
         }
-        if (!isAtOrBelowVoidY(player, y)) return false;
+        if (!isAtOrBelowVoidY(player, y)) {
+            // BUGFIX: only void-y was checked, so particles, effects and sounds
+            // in a hidden cave of the Smart Fill band (glow squid ink, block
+            // break particles, mob sounds) still reached the client. Same
+            // check as entities there. Entity sounds pass band=false: their
+            // position is only the cached spawn spot, and hidden entities'
+            // sounds are already dropped by the EntityHider.
+            if (!band || !isBandPositionHidden(player, x, y, z)) return false;
+            event.setCancelled(true);
+            return true;
+        }
         if (!plugin.isSmartFillEnabledFor(player)) {
             if (!plugin.isProtectionActive(player)) return false;
             event.setCancelled(true);
