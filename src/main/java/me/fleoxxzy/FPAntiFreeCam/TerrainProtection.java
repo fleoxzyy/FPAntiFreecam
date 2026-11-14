@@ -248,8 +248,8 @@ final class TerrainProtection {
 
     /**
      * Starts the sealed-in check if the player is deep enough under the
-     * ground above them. Only called on join and world change, so nobody is
-     * scanned all the time. Player's thread.
+     * ground above them. Only called on join, world change and teleport, so
+     * nobody is scanned all the time. Player's thread.
      */
     void startCheck(Player p) {
         UUID id = p.getUniqueId();

@@ -1842,12 +1842,21 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (smartFillReveal != null) smartFillReveal.clearSight(player.getUniqueId());
         // NEW (terrain protection): the fake surface was worked out for the
         // old spot. Dropped now and re-sent real once the teleport is done;
-        // it only comes back on the next join.
+        // the destination is checked like a join once the player landed.
         if (isTerrainProtected(player.getUniqueId())) {
             forgetTerrainProtection(player.getUniqueId());
             PlatformUtil.runForEntity(this, player, () -> {
                 if (player.isOnline()) refreshFullView(player, true);
             });
+        }
+        // World changes are checked in onPlayerChangedWorld. Pearls, chorus
+        // fruit and short hops (anticheat setbacks) aren't new places.
+        String cause = event.getCause() != null ? event.getCause().name() : "";
+        if (event.getTo() != null && event.getTo().getWorld() != null
+                && event.getTo().getWorld().equals(event.getFrom().getWorld())
+                && !cause.equals("ENDER_PEARL") && !cause.equals("CHORUS_FRUIT")
+                && event.getTo().distanceSquared(event.getFrom()) >= 16 * 16) {
+            checkTerrainAfterTeleport(player, event.getTo().clone(), 0);
         }
         // NEW: re-check entities at the destination straight away. updateFor
         // runs on the player's scheduler, so after the teleport finished.
@@ -1959,6 +1968,24 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                         }));
             });
         }
+    }
+
+    /**
+     * NEW (terrain protection): teleporting into a sealed cave (home, warp,
+     * /tp) counts like joining there. Waits until the player is at the
+     * destination, since the teleport can be redone a tick later (see below)
+     * or go through teleportAsync. Gives up after 5 s (cancelled by another
+     * plugin). Player's thread.
+     */
+    private void checkTerrainAfterTeleport(Player player, Location to, int tries) {
+        PlatformUtil.runForEntityLater(this, player, () -> {
+            if (!player.isOnline() || !player.getWorld().equals(to.getWorld())) return;
+            if (player.getLocation().distanceSquared(to) > 4.0) {
+                if (tries < 25) checkTerrainAfterTeleport(player, to, tries + 1);
+                return;
+            }
+            terrainProtection.startCheck(player);
+        }, null, 2L);
     }
 
     /**
