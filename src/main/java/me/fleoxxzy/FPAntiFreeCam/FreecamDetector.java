@@ -230,6 +230,8 @@ public final class FreecamDetector implements PacketListener {
     /** Runs on the player's thread. */
     private void probe(Player player) {
         UUID id = player.getUniqueId();
+        // BUGFIX: Bedrock (Geyser) can't close this sign editor, so it must never open for them.
+        if (plugin.isBedrockPlayer(player)) return;
         PendingProbe pending = null;
         try {
             // IMPROVEMENT: the sign goes in reach under the player's feet: the

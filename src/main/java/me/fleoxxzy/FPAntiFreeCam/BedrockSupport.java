@@ -2,6 +2,10 @@ package me.fleoxxzy.FPAntiFreeCam;
 
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.server.PluginEnableEvent;
 import org.bukkit.plugin.Plugin;
 
 import java.lang.reflect.Method;
@@ -14,14 +18,16 @@ import java.util.concurrent.ConcurrentHashMap;
  * Detects bedrock players via reflection so the plugin compiles without
  * any Geyser/Floodgate API on the classpath.
  */
-public final class BedrockSupport {
+public final class BedrockSupport implements Listener {
 
-    private static boolean geyserAvailable    = false;
-    private static boolean floodgateAvailable = false;
-    private static Object  geyserApi          = null;
-    private static Object  floodgateApi       = null;
-    private static Method  geyserIsBedrockMethod    = null;
-    private static Method  floodgateIsBedrockMethod = null;
+    // Read on Netty threads, set on the main thread: volatile, and the
+    // "available" flag is written last.
+    private static volatile boolean geyserAvailable    = false;
+    private static volatile boolean floodgateAvailable = false;
+    private static volatile Object  geyserApi          = null;
+    private static volatile Object  floodgateApi       = null;
+    private static volatile Method  geyserIsBedrockMethod    = null;
+    private static volatile Method  floodgateIsBedrockMethod = null;
 
     private final Plugin plugin;
     /** Cache: known bedrock player UUIDs for this session. */
@@ -30,6 +36,21 @@ public final class BedrockSupport {
     public BedrockSupport(Plugin plugin) {
         this.plugin = plugin;
         init();
+        // BUGFIX: this plugin loads at STARTUP, before Geyser and Floodgate
+        // are enabled, so both were always "not enabled" here and Bedrock
+        // players were treated as Java (the Freecam sign probe opened for
+        // them and couldn't be closed). Hooked again once either enables.
+        Bukkit.getPluginManager().registerEvents(this, plugin);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPluginEnable(PluginEnableEvent event) {
+        if (geyserAvailable && floodgateAvailable) return;
+        String name = event.getPlugin().getName();
+        if (name.equalsIgnoreCase("Geyser-Spigot") || name.equalsIgnoreCase("Geyser")
+                || name.equalsIgnoreCase("floodgate")) {
+            init();
+        }
     }
 
     // ── Initialisation ────────────────────────────────────────────────────
@@ -73,7 +94,9 @@ public final class BedrockSupport {
             }
         }
 
-        if (!geyserAvailable && !floodgateAvailable) {
+        // Installed but not enabled yet: hooked by onPluginEnable, no warning.
+        boolean later = (geyser != null && !geyser.isEnabled()) || (floodgate != null && !floodgate.isEnabled());
+        if (!geyserAvailable && !floodgateAvailable && !later) {
             plugin.getLogger().info("[FPAntiFreeCam] Geyser/Floodgate not detected – Bedrock support disabled."
                     + " If Geyser runs on a proxy (BungeeCord/Velocity), install Floodgate on this"
                     + " server too so Bedrock players can be recognised.");
@@ -92,15 +115,32 @@ public final class BedrockSupport {
 
     public boolean isBedrock(Player player) {
         if (player == null) return false;
-        return isBedrock(player.getUniqueId());
+        if (isBedrock(player.getUniqueId())) return true;
+        // NEW: Floodgate's default name prefixes. Java names can't contain these.
+        String name = player.getName();
+        if (name != null && !name.isEmpty() && (name.charAt(0) == '.' || name.charAt(0) == '*')) {
+            bedrockCache.add(player.getUniqueId());
+            return true;
+        }
+        return false;
     }
 
     public boolean isBedrock(UUID id) {
         if (id == null) return false;
         if (bedrockCache.contains(id)) return true;
-        boolean result = checkGeyser(id) || checkFloodgate(id);
+        boolean result = checkGeyser(id) || checkFloodgate(id) || isFloodgateUuid(id);
         if (result) bedrockCache.add(id);
         return result;
+    }
+
+    /**
+     * NEW: Floodgate gives unlinked Bedrock players a UUID made from their
+     * XUID, with the top 64 bits all zero. Java (online or offline) UUIDs
+     * always have version bits there. Catches Bedrock players even when
+     * Floodgate only runs on the proxy.
+     */
+    private static boolean isFloodgateUuid(UUID id) {
+        return id.getMostSignificantBits() == 0L && id.getLeastSignificantBits() != 0L;
     }
 
     /**
