@@ -306,7 +306,7 @@ freecam-detection:
   # Debug info about each check in console.
   debug: false
 
-  # Console commands run on detection, in order.
+  # Console commands run on detection, in order. Leave empty to run none.
   # Placeholders: %player%, %uuid%, %key%
   detected-commands:
     - "kick %player% &cFreecam detected"

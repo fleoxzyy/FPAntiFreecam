@@ -2682,6 +2682,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
                 YamlConfiguration defConfig = YamlConfiguration.loadConfiguration(
                         new InputStreamReader(defStream, StandardCharsets.UTF_8));
                 for (String key : defConfig.getKeys(true)) {
+                    // BUGFIX: an emptied (all commented out) command list is
+                    // the admin's choice, not a missing key. Re-adding the
+                    // default kick here would bring the kicks back.
+                    if (key.equals("freecam-detection.detected-commands")
+                            && cfg.isConfigurationSection("freecam-detection")) continue;
                     if (!cfg.contains(key)) cfg.set(key, defConfig.get(key));
                 }
             }

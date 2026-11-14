@@ -122,7 +122,17 @@ public final class FreecamDetector implements PacketListener {
         alertMessage      = cfg.getString(base + "alert-message", alertMessage);
 
         detectedCommands.clear();
-        detectedCommands.addAll(cfg.getStringList(base + "detected-commands"));
+        // BUGFIX: getStringList falls back to the jar's default list when the
+        // key has no value, so commenting out every command still kicked.
+        // Read without defaults: nothing set means no commands.
+        Object raw = cfg.get(base + "detected-commands", null);
+        if (raw instanceof List<?> list) {
+            for (Object o : list) {
+                if (o != null && !o.toString().isBlank()) detectedCommands.add(o.toString().trim());
+            }
+        } else if (raw instanceof String s && !s.isBlank()) {
+            detectedCommands.add(s.trim());
+        }
 
         if (debug) {
             plugin.getLogger().info("[FPAntiFreeCam] FreecamDetector loaded: enabled=" + enabled
