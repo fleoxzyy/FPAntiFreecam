@@ -254,10 +254,11 @@ final class TerrainProtection {
     void startCheck(Player p) {
         UUID id = p.getUniqueId();
         pending.remove(id);
-        if (plugin.getSmartFillReveal() == null || !plugin.isTerrainProtectionWorld(p.getWorld())
+        World world = p.getWorld(); // PERF: read once
+        if (plugin.getSmartFillReveal() == null || !plugin.isTerrainProtectionWorld(world)
                 || !plugin.isSmartFillActiveFor(p)) return;
         Location eye = p.getEyeLocation();
-        int depth = depthUnderGround(p.getWorld(), eye.getBlockX(), eye.getBlockY(), eye.getBlockZ());
+        int depth = depthUnderGround(world, eye.getBlockX(), eye.getBlockY(), eye.getBlockZ());
         if (depth <= plugin.getTerrainRevealAllDepth() + HYSTERESIS) return;
         pending.put(id, System.currentTimeMillis());
         plugin.dbg("Terrain protection join check started for " + p.getName() + " (depth " + depth + ")");

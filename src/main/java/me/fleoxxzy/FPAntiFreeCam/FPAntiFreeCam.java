@@ -1366,8 +1366,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         // Look-ahead point roughly mid-way into the look cone - far enough
         // that turning to face a different wall actually lands in a
         // different chunk, not so far that minor head wobble triggers it.
-        Vector dir = player.getEyeLocation().getDirection();
-        Location eye = player.getEyeLocation();
+        Location eye = player.getEyeLocation(); // PERF: one eye location for both
+        Vector dir = eye.getDirection();
         int lookAheadDist = Math.min(lookDistance, revealRadius + 8);
         int aheadX = eye.getBlockX() + (int) Math.round(dir.getX() * lookAheadDist);
         int aheadZ = eye.getBlockZ() + (int) Math.round(dir.getZ() * lookAheadDist);
@@ -1642,12 +1642,12 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
      */
     private boolean calculateRaycast(Player player) {
         // Condition 1: camera pointing meaningfully upward
-        Vector dir = player.getEyeLocation().getDirection();
+        Location eye = player.getEyeLocation(); // PERF: one eye location for both
+        Vector dir = eye.getDirection();
         if (dir.getY() > raycastMinUpward) return true;
 
         // Condition 2: unobstructed path to sky
         try {
-            Location eye    = player.getEyeLocation();
             double   distUp = protectionY - eye.getY();
             if (distUp <= 0.5) return true; // already at surface, unobstructed
 
