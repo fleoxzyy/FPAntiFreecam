@@ -39,7 +39,7 @@ It works on the packets the server sends, so nothing in your world is changed. T
 - **Anti-FreeCam:** hides everything below a set Y level while players are on the surface.
 - **Smart Fill:** fills hidden areas with rock copied from the surrounding terrain instead of air, so it's hard to tell anything is hidden at all.
 - **Terrain Protection:** if you join or teleport while sealed in a cave with no way up, the surface above you is faked too (one block per chunk, shaped like the land around it), so freecam shows nothing real up there. It turns real again in steps as you climb up. Needs Smart Fill, Overworld only.
-- **Chunk Finder patches:** blocks the tricks Chunk Finder / Sus Chunk modules use to spot bases and tunnels: block updates, light, chunk palettes and giveaway blocks (rotated deepslate, cobblestone, calcite and so on) in hidden areas.
+- **Base Finder Protection:** stops client modules that guess where bases and tunnels are (Chunk Finder, Sus Chunk) from using block updates, light, chunk palettes or giveaway blocks (rotated deepslate, cobblestone, calcite and so on) in hidden areas.
 - **Anti-Xray:** ores stay hidden until you can actually see them, including from the F5 camera. Ore lists and height ranges can be set per world.
 - **Entity hiding:** mobs and item frames inside hidden areas are hidden too (`chunk` mode, default). `raycast` mode also hides entities behind walls everywhere, like an ESP blocker, and can include players. The tab list is untouched.
 - **Hides more than blocks:** chests, signs, spawners, mobs, item frames, particles and sounds in hidden areas are hidden too, so the F3 pie chart and ESP mods can't find a base.
