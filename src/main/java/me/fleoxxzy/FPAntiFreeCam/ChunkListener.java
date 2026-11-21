@@ -656,7 +656,7 @@ public final class ChunkListener implements PacketListener {
                 plugin.incrementChunksModified();
                 plugin.addBlocksReplaced(replacedCount);
                 rememberFlatMasked(player.getUniqueId(), column);
-                plugin.dbg("CHUNK_DATA modified for " + player.getName()
+                if (plugin.isDebug()) plugin.dbg("CHUNK_DATA modified for " + player.getName()
                         + " (" + replacedCount + " blocks, flat, tile entities stripped)");
             } else {
                 forgetFlatMasked(player.getUniqueId(), column);
@@ -831,7 +831,7 @@ public final class ChunkListener implements PacketListener {
             normalizeSections(sections, dirty);
             try {
                 if (darkenReplaced(wrapper.getLightData(), replacedBits)) {
-                    plugin.dbg("CHUNK_DATA light cleared at filled blocks for " + player.getName());
+                    if (plugin.isDebug()) plugin.dbg("CHUNK_DATA light cleared at filled blocks for " + player.getName());
                 }
             } catch (Exception e) {
                 plugin.dbg("CHUNK_DATA light error: " + e.getMessage());
@@ -840,7 +840,7 @@ public final class ChunkListener implements PacketListener {
             event.markForReEncode(true);
             plugin.incrementChunksModified();
             plugin.addBlocksReplaced(replacedCount);
-            plugin.dbg("CHUNK_DATA modified for " + player.getName()
+            if (plugin.isDebug()) plugin.dbg("CHUNK_DATA modified for " + player.getName()
                     + " (" + replacedCount + " blocks, smart-fill, tile entities stripped)");
         }
     }
@@ -991,7 +991,7 @@ public final class ChunkListener implements PacketListener {
         event.markForReEncode(true);
         plugin.incrementChunksModified();
         plugin.addBlocksReplaced(replaced);
-        plugin.dbg("CHUNK_DATA " + cx + "," + cz + " terrain protection for " + player.getName()
+        if (plugin.isDebug()) plugin.dbg("CHUNK_DATA " + cx + "," + cz + " terrain protection for " + player.getName()
                 + " (" + replaced + " blocks, floor Y=" + floor + ")");
     }
 
@@ -1113,7 +1113,7 @@ public final class ChunkListener implements PacketListener {
                     return false;
                 }
                 event.setCancelled(true);
-                plugin.dbg("BLOCK_CHANGE dropped at " + pos + " (terrain protection) for " + player.getName());
+                if (plugin.isDebug()) plugin.dbg("BLOCK_CHANGE dropped at " + pos + " (terrain protection) for " + player.getName());
                 return true;
             }
             WrapperPlayServerMultiBlockChange wrapper = new WrapperPlayServerMultiBlockChange(event);
@@ -1134,7 +1134,7 @@ public final class ChunkListener implements PacketListener {
             if (kept == null) return false;
             if (kept.isEmpty()) {
                 event.setCancelled(true);
-                plugin.dbg("MULTI_BLOCK_CHANGE dropped (terrain protection) for " + player.getName());
+                if (plugin.isDebug()) plugin.dbg("MULTI_BLOCK_CHANGE dropped (terrain protection) for " + player.getName());
                 return true;
             }
             wrapper.setBlocks(kept.toArray(new WrapperPlayServerMultiBlockChange.EncodedBlock[0]));
@@ -1363,7 +1363,7 @@ public final class ChunkListener implements PacketListener {
             }
             if (changed) {
                 event.markForReEncode(true);
-                plugin.dbg("UPDATE_LIGHT cleared hidden block light in " + wrapper.getX() + "," + wrapper.getZ()
+                if (plugin.isDebug()) plugin.dbg("UPDATE_LIGHT cleared hidden block light in " + wrapper.getX() + "," + wrapper.getZ()
                         + " for " + player.getName());
             }
         } catch (Exception e) {
@@ -1462,7 +1462,7 @@ public final class ChunkListener implements PacketListener {
                     event.markForReEncode(true);
                     plugin.addBlocksReplaced(1);
                     rememberFlatMasked(player.getUniqueId(), pos.getX() >> 4, pos.getZ() >> 4);
-                    plugin.dbg("BLOCK_CHANGE modified at " + pos + " for " + player.getName());
+                    if (plugin.isDebug()) plugin.dbg("BLOCK_CHANGE modified at " + pos + " for " + player.getName());
                 }
                 return;
             }
@@ -1551,7 +1551,7 @@ public final class ChunkListener implements PacketListener {
         markMaskedCell(player.getUniqueId(), pos.getX(), pos.getY(), pos.getZ(),
                 player.getWorld().getMinHeight() >> 4);
         plugin.addBlocksReplaced(1);
-        plugin.dbg("BLOCK_CHANGE dropped (" + why + ") at " + pos + " for " + player.getName());
+        if (plugin.isDebug()) plugin.dbg("BLOCK_CHANGE dropped (" + why + ") at " + pos + " for " + player.getName());
     }
 
     // ── MULTI_BLOCK_CHANGE ────────────────────────────────────────────────
@@ -1589,7 +1589,7 @@ public final class ChunkListener implements PacketListener {
                 if (modified) {
                     event.markForReEncode(true);
                     plugin.addBlocksReplaced(replacedCount);
-                    plugin.dbg("MULTI_BLOCK_CHANGE modified for " + player.getName()
+                    if (plugin.isDebug()) plugin.dbg("MULTI_BLOCK_CHANGE modified for " + player.getName()
                             + " (" + replacedCount + " blocks, flat)");
                 }
                 return;
@@ -1685,7 +1685,7 @@ public final class ChunkListener implements PacketListener {
                     wrapper.setBlocks(kept.toArray(new WrapperPlayServerMultiBlockChange.EncodedBlock[0]));
                     event.markForReEncode(true);
                 }
-                plugin.dbg("MULTI_BLOCK_CHANGE dropped " + replacedCount + " hidden blocks for "
+                if (plugin.isDebug()) plugin.dbg("MULTI_BLOCK_CHANGE dropped " + replacedCount + " hidden blocks for "
                         + player.getName() + (event.isCancelled() ? " (whole packet)" : ""));
             }
         } catch (Exception e) {
@@ -1701,7 +1701,7 @@ public final class ChunkListener implements PacketListener {
                     : new WrapperPlayServerBlockAction(event).getBlockPosition();
             if (pos == null || !xray.isMasked(player, pos.getX(), pos.getY(), pos.getZ())) return false;
             event.setCancelled(true);
-            plugin.dbg("Anti-Xray " + type + " cancelled at " + pos + " for " + player.getName());
+            if (plugin.isDebug()) plugin.dbg("Anti-Xray " + type + " cancelled at " + pos + " for " + player.getName());
             return true;
         } catch (Exception e) {
             plugin.dbg("Anti-Xray " + type + " error: " + e.getMessage());
@@ -1722,7 +1722,7 @@ public final class ChunkListener implements PacketListener {
             if (fake <= 0 || fake == wrapper.getData()) return;
             wrapper.setData(fake);
             event.markForReEncode(true);
-            plugin.dbg("Anti-Xray break effect masked at " + pos + " for " + player.getName());
+            if (plugin.isDebug()) plugin.dbg("Anti-Xray break effect masked at " + pos + " for " + player.getName());
         } catch (Exception e) {
             plugin.dbg("Anti-Xray EFFECT error: " + e.getMessage());
         }
@@ -1773,7 +1773,7 @@ public final class ChunkListener implements PacketListener {
             if (!plugin.isPieChartProtectionEnabled()) return;
 
             if (cancelIfShouldHide(event, player, pos.getY(), pos.getX(), pos.getZ())) {
-                plugin.dbg("BLOCK_ENTITY_DATA cancelled at " + pos + " for " + player.getName());
+                if (plugin.isDebug()) plugin.dbg("BLOCK_ENTITY_DATA cancelled at " + pos + " for " + player.getName());
             }
         } catch (Exception e) {
             plugin.dbg("BLOCK_ENTITY_DATA error: " + e.getMessage());
@@ -1792,7 +1792,7 @@ public final class ChunkListener implements PacketListener {
             if (pos == null) return;
 
             if (cancelIfShouldHide(event, player, pos.getY(), pos.getX(), pos.getZ())) {
-                plugin.dbg("BLOCK_ACTION cancelled at " + pos + " for " + player.getName());
+                if (plugin.isDebug()) plugin.dbg("BLOCK_ACTION cancelled at " + pos + " for " + player.getName());
             }
         } catch (Exception e) {
             plugin.dbg("BLOCK_ACTION error: " + e.getMessage());
@@ -1808,7 +1808,7 @@ public final class ChunkListener implements PacketListener {
             if (pos == null) return;
 
             if (cancelIfHiddenHardFloor(event, player, pos.getX(), pos.getY(), pos.getZ())) {
-                plugin.dbg("EFFECT cancelled at " + pos + " for " + player.getName());
+                if (plugin.isDebug()) plugin.dbg("EFFECT cancelled at " + pos + " for " + player.getName());
             }
         } catch (Exception e) {
             plugin.dbg("EFFECT error: " + e.getMessage());
@@ -1828,7 +1828,7 @@ public final class ChunkListener implements PacketListener {
             int by = Math.floorDiv(pos.getY(), 8);
             int bz = Math.floorDiv(pos.getZ(), 8);
             if (cancelIfHiddenHardFloor(event, player, bx, by, bz)) {
-                plugin.dbg("SOUND_EFFECT cancelled at " + pos + " for " + player.getName());
+                if (plugin.isDebug()) plugin.dbg("SOUND_EFFECT cancelled at " + pos + " for " + player.getName());
             }
         } catch (Exception e) {
             plugin.dbg("SOUND_EFFECT error: " + e.getMessage());
@@ -1847,7 +1847,7 @@ public final class ChunkListener implements PacketListener {
             if (cached == null) return; // unknown entity, let it through
 
             if (cancelIfHiddenHardFloor(event, player, cached[0], cached[1], cached[2], false)) {
-                plugin.dbg("ENTITY_SOUND_EFFECT cancelled for entity #"
+                if (plugin.isDebug()) plugin.dbg("ENTITY_SOUND_EFFECT cancelled for entity #"
                         + entityId + " at Y=" + cached[1]
                         + " for " + player.getName());
             }
@@ -1866,7 +1866,7 @@ public final class ChunkListener implements PacketListener {
 
             if (cancelIfHiddenHardFloor(event, player, (int) Math.floor(pos.getX()),
                     (int) Math.floor(pos.getY()), (int) Math.floor(pos.getZ()))) {
-                plugin.dbg("PARTICLE cancelled at " + pos + " for " + player.getName());
+                if (plugin.isDebug()) plugin.dbg("PARTICLE cancelled at " + pos + " for " + player.getName());
             }
         } catch (Exception e) {
             plugin.dbg("PARTICLE error: " + e.getMessage());
@@ -1926,7 +1926,7 @@ public final class ChunkListener implements PacketListener {
             if (hider.onSpawnPacket(viewerId, entityId, entityUuid, isPlayer, typeKey,
                     pos.getX(), pos.getY(), pos.getZ(), zoneHidden)) {
                 event.setCancelled(true);
-                plugin.dbg("Spawn cancelled for entity #" + entityId
+                if (plugin.isDebug()) plugin.dbg("Spawn cancelled for entity #" + entityId
                         + (typeKey != null ? " (" + typeKey + ")" : isPlayer ? " (player)" : "")
                         + " at Y=" + entityPos[1] + " for " + player.getName()
                         + (zoneHidden ? " [zone]" : " [sight]"));
