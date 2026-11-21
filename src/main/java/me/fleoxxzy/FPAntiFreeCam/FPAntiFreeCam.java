@@ -46,7 +46,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 
 /**
@@ -156,9 +156,10 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private final Map<UUID, Location> lastSignificantMoveLoc = new ConcurrentHashMap<>();
 
     // ── Stats counters ────────────────────────────────────────────────────
-    public final AtomicLong totalPacketsProcessed = new AtomicLong();
-    public final AtomicLong totalChunksModified   = new AtomicLong();
-    public final AtomicLong totalBlocksReplaced   = new AtomicLong();
+    // PERF: LongAdder, every Netty thread bumps these for every handled packet.
+    public final LongAdder totalPacketsProcessed = new LongAdder();
+    public final LongAdder totalChunksModified   = new LongAdder();
+    public final LongAdder totalBlocksReplaced   = new LongAdder();
     private long enabledAt = 0;
 
     // ── Config-driven values ──────────────────────────────────────────────
@@ -720,9 +721,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     public boolean isDebug() { return debugMode; }
 
     // ── Stats incrementers ────────────────────────────────────────────────
-    public void incrementPacketsProcessed() { totalPacketsProcessed.incrementAndGet(); }
-    public void incrementChunksModified()   { totalChunksModified.incrementAndGet();   }
-    public void addBlocksReplaced(long n)   { totalBlocksReplaced.addAndGet(n);        }
+    public void incrementPacketsProcessed() { totalPacketsProcessed.increment(); }
+    public void incrementChunksModified()   { totalChunksModified.increment();   }
+    public void addBlocksReplaced(long n)   { totalBlocksReplaced.add(n);        }
 
     // ═════════════════════════════════════════════════════════════════════
     //  Config & language loading
@@ -2557,8 +2558,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         }
 
         statsHeader(sender, "Traffic");
-        statsRow(sender, "Packets", "&f" + totalPacketsProcessed.get() + " &7processed &8· &f"
-                + totalChunksModified.get() + " &7chunks &8· &f" + totalBlocksReplaced.get() + " &7blocks replaced");
+        statsRow(sender, "Packets", "&f" + totalPacketsProcessed.sum() + " &7processed &8· &f"
+                + totalChunksModified.sum() + " &7chunks &8· &f" + totalBlocksReplaced.sum() + " &7blocks replaced");
         if (foliaScheduler != null) statsRow(sender, "Scheduler", "&7Folia &8· &f" + foliaScheduler.stats());
         if (paperScheduler != null) statsRow(sender, "Scheduler", "&7Paper &8· &f" + paperScheduler.stats());
         statsRow(sender, "Caches", "&f" + (chunkListener != null ? chunkListener.getEntityCacheSize() : 0) + " &7entity Y");
