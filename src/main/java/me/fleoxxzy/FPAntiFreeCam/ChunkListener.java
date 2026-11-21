@@ -2262,6 +2262,12 @@ public final class ChunkListener implements PacketListener {
         return out;
     }
 
+    /** PERF: true if the client may still have flat-masked chunks. Any thread. */
+    public boolean hasFlatMasked(UUID playerId) {
+        Set<Long> s = flatMaskedChunks.get(playerId);
+        return s != null && !s.isEmpty();
+    }
+
     /**
      * PERF: the global id section.get would report for this raw id (an id
      * PacketEvents doesn't know reads as air, 0). No state copy.

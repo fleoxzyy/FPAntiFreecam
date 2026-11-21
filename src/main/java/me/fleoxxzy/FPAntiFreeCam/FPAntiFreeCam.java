@@ -1255,6 +1255,8 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
     private void startEntityRecheckTask() {
         entityRecheckTask = PlatformUtil.runTaskTimer(this, () -> {
             for (Player p : Bukkit.getOnlinePlayers()) {
+                // PERF: nothing to heal, so no task is scheduled for this player.
+                if (chunkListener == null || !chunkListener.hasFlatMasked(p.getUniqueId())) continue;
                 Player captured = p;
                 PlatformUtil.runForEntity(this, captured, () -> {
                     if (!captured.isOnline()) return;
