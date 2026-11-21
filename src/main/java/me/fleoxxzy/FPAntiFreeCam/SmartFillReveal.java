@@ -295,14 +295,6 @@ public final class SmartFillReveal implements Listener {
         return sight != null && (sight.near.contains(sub) || sight.far.contains(sectionKey(sx >> 2, sy >> 2, sz >> 2)));
     }
 
-    /** Position check for tile entity stripping. */
-    public boolean isPositionRevealed(UUID playerId, int bX, int bY, int bZ) {
-        Player p = org.bukkit.Bukkit.getPlayer(playerId);
-        if (p == null) return false;
-        Location loc = p.getLocation();
-        return isAirRevealed(bX, bY, bZ, playerId, loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
-    }
-
     /**
      * Past this distance (blocks, feet to section) nothing but the far
      * sight sweep can reveal a sub-cell: the fill, the sphere, the near

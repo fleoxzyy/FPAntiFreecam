@@ -716,6 +716,9 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (debugMode) getLogger().info("[FPAntiFreeCam DEBUG] " + message);
     }
 
+    /** PERF: hot paths check this before building a debug message. */
+    public boolean isDebug() { return debugMode; }
+
     // ── Stats incrementers ────────────────────────────────────────────────
     public void incrementPacketsProcessed() { totalPacketsProcessed.incrementAndGet(); }
     public void incrementChunksModified()   { totalChunksModified.incrementAndGet();   }

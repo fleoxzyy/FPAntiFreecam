@@ -646,7 +646,7 @@ public final class ChunkListener implements PacketListener {
             }
 
             if (plugin.isPieChartProtectionEnabled() && column != null) {
-                if (stripTileEntitiesBelow(column, hardFloorY, false, null, null, null, hardFloorY)) modified = true;
+                if (stripTileEntitiesBelow(column, hardFloorY, false, null, null, null, hardFloorY, 0, 0, 0)) modified = true;
             }
 
             if (modified) {
@@ -819,7 +819,7 @@ public final class ChunkListener implements PacketListener {
 
         if (plugin.isPieChartProtectionEnabled() && column != null) {
             boolean tileModified = stripTileEntitiesBelow(column, chunkTop, true, reveal, playerId,
-                    cover, ceilingY);
+                    cover, ceilingY, pBX, pBY, pBZ);
             if (tileModified) modified = true;
         }
 
@@ -1378,37 +1378,45 @@ public final class ChunkListener implements PacketListener {
      */
     private boolean stripTileEntitiesBelow(Column column, int maxY, boolean useSmartFill,
                                            SmartFillReveal reveal, UUID playerId,
-                                           short[] cover, int ceilingY) {
+                                           short[] cover, int ceilingY, int pBX, int pBY, int pBZ) {
         try {
             TileEntity[] tileEntities = column.getTileEntities();
             if (tileEntities == null || tileEntities.length == 0) return false;
 
-            List<TileEntity> filtered = new ArrayList<>(tileEntities.length);
-            boolean changed = false;
+            // PERF: only built once something is stripped (most chunks keep all of them).
+            List<TileEntity> filtered = null;
 
-            for (TileEntity te : tileEntities) {
+            for (int i = 0; i < tileEntities.length; i++) {
+                TileEntity te = tileEntities[i];
                 if (te == null) continue;
                 int teY = te.getY();
                 // Follow-terrain: above ceiling-y only where that column is covered.
                 boolean inZone = teY <= maxY && (teY <= ceilingY || cover == null
                         || teY <= cover[((te.getZ() & 15) << 4) | (te.getX() & 15)]);
+                boolean strip = false;
                 if (inZone) {
                     if (useSmartFill && reveal != null) {
-                        if (!reveal.isPositionRevealed(playerId, te.getX(), teY, te.getZ())) {
-                            changed = true;
-                            plugin.dbg("Stripped smart-fill tile entity at " + te.getX() + "," + teY + "," + te.getZ());
-                            continue;
+                        // PERF: the position the block pass used, not a Bukkit lookup on Netty per tile entity.
+                        if (!reveal.isAirRevealed(te.getX(), teY, te.getZ(), playerId, pBX, pBY, pBZ)) {
+                            strip = true;
+                            if (plugin.isDebug()) plugin.dbg("Stripped smart-fill tile entity at " + te.getX() + "," + teY + "," + te.getZ());
                         }
                     } else if (!useSmartFill) {
-                        changed = true;
-                        plugin.dbg("Stripped tile entity at Y=" + teY);
-                        continue;
+                        strip = true;
+                        if (plugin.isDebug()) plugin.dbg("Stripped tile entity at Y=" + teY);
                     }
                 }
-                filtered.add(te);
+                if (strip) {
+                    if (filtered == null) {
+                        filtered = new ArrayList<>(tileEntities.length);
+                        for (int j = 0; j < i; j++) if (tileEntities[j] != null) filtered.add(tileEntities[j]);
+                    }
+                } else if (filtered != null) {
+                    filtered.add(te);
+                }
             }
 
-            if (!changed) return false;
+            if (filtered == null) return false;
 
             try {
                 if (TILE_ENTITIES_FIELD == null) {
