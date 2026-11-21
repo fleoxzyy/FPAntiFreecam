@@ -20,8 +20,6 @@ import com.github.retrooper.packetevents.protocol.world.chunk.palette.SingletonP
 import com.github.retrooper.packetevents.protocol.world.chunk.storage.BaseStorage;
 import com.github.retrooper.packetevents.protocol.world.chunk.storage.BitStorage;
 import com.github.retrooper.packetevents.protocol.world.states.WrappedBlockState;
-import com.github.retrooper.packetevents.protocol.world.states.type.StateType;
-import com.github.retrooper.packetevents.protocol.world.states.type.StateTypes;
 import com.github.retrooper.packetevents.util.Vector3i;
 import com.github.retrooper.packetevents.protocol.entity.type.EntityType;
 import com.github.retrooper.packetevents.protocol.entity.type.EntityTypes;
@@ -723,7 +721,8 @@ public final class ChunkListener implements PacketListener {
                     int worldZ = (chunkZ << 4) | lz;
                     if (worldY > ceilingY && (cover == null || worldY > cover[(lz << 4) | lx])) continue;
                 try {
-                                WrappedBlockState current = section.get(lx, ly, lz);
+                                // PERF: the raw id instead of section.get, which copies the state for every block.
+                                int currentId = section.getBlockId(lx, ly, lz);
 
                                 // IMPROVEMENT: shallow surface structures
                                 // (PvP arenas, crystal holes, player-built
@@ -773,7 +772,8 @@ public final class ChunkListener implements PacketListener {
                         WrappedBlockState hardFloorFill = palette != null
                                 ? smartFill.selectState(palette, worldX, worldY, worldZ)
                                 : smartFill.getDefaultState(worldName, worldY);
-                        if (current == null || current.getGlobalId() != hardFloorFill.getGlobalId()) {
+                        if (currentId != hardFloorFill.getGlobalId()
+                                && (hardFloorFill.getGlobalId() != 0 || knownId(currentId) != 0)) {
                             section.set(lx, ly, lz, hardFloorFill);
                                         replacedCount++;
                             modified = true;
@@ -784,8 +784,7 @@ public final class ChunkListener implements PacketListener {
                 }
 
                                 // Smart Fill camouflage band
-                                StateType type = current != null ? current.getType() : StateTypes.AIR;
-                                if (current != null && SmartFillEngine.isSafeTerrain(current)) continue; // already looks natural
+                                if (SmartFillEngine.isSafeTerrainId(currentId)) continue; // already looks natural
 
                                 // BUGFIX: previously anything between hardFloorY and
                                 // ceilingY that wasn't "safe terrain" got filled
@@ -2252,6 +2251,16 @@ public final class ChunkListener implements PacketListener {
             if (s.remove(k)) out.add(k);
         }
         return out;
+    }
+
+    /**
+     * PERF: the global id section.get would report for this raw id (an id
+     * PacketEvents doesn't know reads as air, 0). No state copy.
+     */
+    private static int knownId(int id) {
+        if (id == 0) return 0;
+        WrappedBlockState s = WrappedBlockState.getByGlobalId(id, false);
+        return s != null ? s.getGlobalId() : 0;
     }
 
     private static long columnKey(int cx, int cz) {

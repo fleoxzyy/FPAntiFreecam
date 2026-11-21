@@ -182,6 +182,21 @@ public final class SmartFillEngine {
         return type != StateTypes.DEEPSLATE || !isRotatedDeepslate(state.getGlobalId());
     }
 
+    // PERF: the answer above only depends on the block id, so it is kept per id
+    // (0 unknown, 1 safe, 2 not). The chunk loop then needs no state copy per block.
+    private static final byte[] SAFE_BY_ID = new byte[1 << 16];
+
+    /** Same as isSafeTerrain(state) for the state with this global id. Any thread. */
+    public static boolean isSafeTerrainId(int id) {
+        if (id < 0 || id >= SAFE_BY_ID.length) return isSafeTerrain(WrappedBlockState.getByGlobalId(id, false));
+        byte b = SAFE_BY_ID[id];
+        if (b == 0) {
+            b = isSafeTerrain(WrappedBlockState.getByGlobalId(id, false)) ? (byte) 1 : (byte) 2;
+            SAFE_BY_ID[id] = b;
+        }
+        return b == 1;
+    }
+
     private static volatile int deepslateUpId = Integer.MIN_VALUE;
 
     /** True for a deepslate global id other than deepslate[axis=y]. */
