@@ -2311,7 +2311,9 @@ public final class ChunkListener implements PacketListener {
      * smaller reveal means fewer re-sends, not more (each one is a visible
      * reload on Bedrock). Any thread (reads snapshots only).
      */
-    public boolean shouldRefreshForReveal(Player player, int cx, int cz) {
+    public boolean shouldRefreshForReveal(Player player, int cx, int cz, int px, int py, int pz) {
+        // PERF: (px, py, pz) is the player's block position, read once by the
+        // caller for every column it checks instead of once per column.
         UUID id = player.getUniqueId();
         Map<Long, MaskedChunk> m = maskedChunks.get(id);
         if (m == null) return false;
@@ -2321,8 +2323,6 @@ public final class ChunkListener implements PacketListener {
         SmartFillReveal reveal = plugin.getSmartFillReveal();
         if (reveal == null) return false;
 
-        org.bukkit.Location loc = player.getLocation();
-        int px = loc.getBlockX(), py = loc.getBlockY(), pz = loc.getBlockZ();
         long farSq = (long) reveal.getFarOnlyDistance() * reveal.getFarOnlyDistance();
         for (int i = 0; i < mc.subMasks.length; i++) {
             long bits = mc.subMasks[i];

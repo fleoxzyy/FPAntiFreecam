@@ -1410,9 +1410,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         if (chunkListener != null) {
             int pcx = loc.getBlockX() >> 4;
             int pcz = loc.getBlockZ() >> 4;
+            // PERF: the position read above, not a new one for each column.
+            int pbx = loc.getBlockX(), pby = loc.getBlockY(), pbz = loc.getBlockZ();
             for (int cx = pcx - chunkRadius; cx <= pcx + chunkRadius; cx++) {
                 for (int cz = pcz - chunkRadius; cz <= pcz + chunkRadius; cz++) {
-                    if (chunkListener.shouldRefreshForReveal(player, cx, cz)) {
+                    if (chunkListener.shouldRefreshForReveal(player, cx, cz, pbx, pby, pbz)) {
                         toRefresh.add(((long) cx << 32) | (cz & 0xFFFFFFFFL));
                     }
                 }
@@ -1503,8 +1505,11 @@ public final class FPAntiFreeCam extends JavaPlugin implements Listener, Command
         // IMPROVEMENT: checked per masked 4×4×4 sub-cell, not per column.
         if (chunkListener != null) {
             Set<Long> filtered = new HashSet<>();
+            // PERF: one position read for every column.
+            Location pl = player.getLocation();
+            int pbx = pl.getBlockX(), pby = pl.getBlockY(), pbz = pl.getBlockZ();
             for (long k : columns) {
-                if (chunkListener.shouldRefreshForReveal(player, (int) (k >> 32), (int) k)) filtered.add(k);
+                if (chunkListener.shouldRefreshForReveal(player, (int) (k >> 32), (int) k, pbx, pby, pbz)) filtered.add(k);
             }
             columns = filtered;
         }
