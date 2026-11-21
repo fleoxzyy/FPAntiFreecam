@@ -186,13 +186,14 @@ public final class FoliaScheduler {
     }
 
     private void sendOne(Player player, ChunkTask t) {
-        Location chunkLoc = new Location(t.world, t.cx << 4, 0, t.cz << 4);
-        if (PlatformUtil.isOwnedByCurrentRegion(chunkLoc)) {
+        // PERF: chunk-coordinate ownership check; a Location only for the rare hand-off.
+        if (PlatformUtil.isOwnedByCurrentRegion(t.world, t.cx, t.cz)) {
             sender.send(player, t.world, t.cx, t.cz);
         } else {
             // Rare: chunk is loaded by this player but sits in a different
             // region. Read it on its owning thread; the packet still only
             // goes to this player.
+            Location chunkLoc = new Location(t.world, t.cx << 4, 0, t.cz << 4);
             PlatformUtil.runTask(plugin, chunkLoc, () -> sender.send(player, t.world, t.cx, t.cz));
         }
     }
