@@ -5,6 +5,7 @@ import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerDe
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
@@ -625,6 +626,7 @@ public final class EntityHider implements Listener {
         showOutOfRange(player, v, now, los ? OUT_OF_RANGE_SWEEP_MS : 0);
 
         int[] budget = { rayBudget };
+        RayVisitor rv = new RayVisitor();
         boolean cut = false;
         long wallsOpenedAt = v.wallsOpenedAt;
         Map<Integer, Boolean> stackVisible = new java.util.HashMap<>();
@@ -675,7 +677,7 @@ public final class EntityHider implements Listener {
                 } else {
                     updateVelocity(t, c.x, c.y, c.z, now);
                     int before = budget[0];
-                    int r = visibility(world, minY, maxY, folia, cams, leadBox(e, t), budget,
+                    int r = visibility(world, minY, maxY, folia, cams, leadBox(e, t), budget, rv,
                             c.d2 > FAR_POINTS_DIST * FAR_POINTS_DIST);
                     raySteps.addAndGet(before - Math.max(0, budget[0]));
                     if (r == NO_BUDGET) {
@@ -993,7 +995,7 @@ public final class EntityHider implements Listener {
      * paintings) still get the full set, the points just sit close together.
      */
     private static int visibility(World world, int minY, int maxY, boolean folia, double[] cams,
-                                  BoundingBox box, int[] budget, boolean far) {
+                                  BoundingBox box, int[] budget, RayVisitor rv, boolean far) {
         double x0 = box.getMinX(), y0 = box.getMinY(), z0 = box.getMinZ();
         double x1 = box.getMaxX(), y1 = box.getMaxY(), z1 = box.getMaxZ();
         double ix = (x1 - x0) * CORNER_INSET, iy = (y1 - y0) * CORNER_INSET, iz = (z1 - z0) * CORNER_INSET;
@@ -1018,7 +1020,7 @@ public final class EntityHider implements Listener {
                     py = (k & 2) != 0 ? y1 - iy : y0 + iy;
                     pz = (k & 4) != 0 ? z1 - iz : z0 + iz;
                 }
-                int r = ray(world, minY, maxY, folia, ox, oy, oz, px, py, pz, budget);
+                int r = ray(world, minY, maxY, folia, ox, oy, oz, px, py, pz, budget, rv);
                 if (r != HIDDEN) return r;
             }
         }
@@ -1026,7 +1028,8 @@ public final class EntityHider implements Listener {
     }
 
     private static int ray(World world, int minY, int maxY, boolean folia,
-                           double ox, double oy, double oz, double tx, double ty, double tz, int[] budget) {
+                           double ox, double oy, double oz, double tx, double ty, double tz, int[] budget,
+                           RayVisitor rv) {
         double dx = tx - ox, dy = ty - oy, dz = tz - oz;
         double len = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (len < 1e-6) return VISIBLE;
@@ -1044,21 +1047,35 @@ public final class EntityHider implements Listener {
             ox += dx * t; oy = edge; oz += dz * t;
             len -= t;
         }
-        final int bx = floor(tx), by = floor(ty), bz = floor(tz);
-        final double end = len;
-        boolean[] reached = { false };
+        rv.bx = floor(tx); rv.by = floor(ty); rv.bz = floor(tz);
+        rv.end = len;
+        rv.reached = false;
         int r = SightRaycaster.walk(world, minY, maxY, folia, ox, oy, oz, dx, dy, dz,
-                len + 0.01, budget, (x, y, z, type, blocks, t) -> {
-                    // The target's own cell counts as reached: an entity half
-                    // inside a wall is still visible from its open side.
-                    if ((x == bx && y == by && z == bz) || t >= end) { reached[0] = true; return false; }
-                    return !blocks || t <= 0; // the camera's own cell never blocks
-                });
-        if (reached[0] || r == SightRaycaster.REACHED_END) return VISIBLE;
+                len + 0.01, budget, rv);
+        if (rv.reached || r == SightRaycaster.REACHED_END) return VISIBLE;
         if (r == SightRaycaster.OUT_OF_BUDGET) return NO_BUDGET;
         // Unloaded chunk / other Folia region / world edge: we can't tell, show it.
         if (r == SightRaycaster.UNREADABLE) return VISIBLE;
         return HIDDEN;
+    }
+
+    /**
+     * PERF: the per-ray visitor, reused for every ray of one check instead of
+     * a new lambda and flag array per ray. One per check (Folia runs checks
+     * in parallel), so never shared between threads.
+     */
+    private static final class RayVisitor implements SightRaycaster.CellVisitor {
+        int bx, by, bz;
+        double end;
+        boolean reached;
+
+        @Override
+        public boolean visit(int x, int y, int z, Material type, boolean blocks, double t) {
+            // The target's own cell counts as reached: an entity half
+            // inside a wall is still visible from its open side.
+            if ((x == bx && y == by && z == bz) || t >= end) { reached = true; return false; }
+            return !blocks || t <= 0; // the camera's own cell never blocks
+        }
     }
 
     private static int floor(double v) {
