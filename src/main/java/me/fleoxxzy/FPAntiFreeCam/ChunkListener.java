@@ -390,6 +390,12 @@ public final class ChunkListener implements PacketListener {
                 && xray != null && xray.isActiveFor(player) && cancelIfXrayMasked(event, player, type, xray)) {
             return;
         }
+        // BUGFIX: block break particles (effect 2001) carry the broken block's
+        // id and are sent before it turns to air, so anyone in range learned
+        // the real ore behind a wall. Give them the fake block's id instead.
+        if (type == PacketType.Play.Server.EFFECT && xray != null && xray.isActiveFor(player)) {
+            maskBreakEffect(event, player, xray);
+        }
 
         if (world == null || !plugin.isWorldProtected(world.getName())) {
             if (xrayActive) handleBlockPacket(event, player, type, false);
@@ -1693,6 +1699,25 @@ public final class ChunkListener implements PacketListener {
         } catch (Exception e) {
             plugin.dbg("Anti-Xray " + type + " error: " + e.getMessage());
             return false;
+        }
+    }
+
+    /** Level event id for block break particles + sound; data is the block state id. */
+    private static final int EFFECT_BLOCK_BREAK = 2001;
+
+    private void maskBreakEffect(PacketSendEvent event, Player player, AntiXrayEngine xray) {
+        try {
+            WrapperPlayServerEffect wrapper = new WrapperPlayServerEffect(event);
+            if (wrapper.getType() != EFFECT_BLOCK_BREAK) return;
+            Vector3i pos = wrapper.getPosition();
+            if (pos == null) return;
+            int fake = xray.maskedFakeId(player, pos.getX(), pos.getY(), pos.getZ());
+            if (fake <= 0 || fake == wrapper.getData()) return;
+            wrapper.setData(fake);
+            event.markForReEncode(true);
+            plugin.dbg("Anti-Xray break effect masked at " + pos + " for " + player.getName());
+        } catch (Exception e) {
+            plugin.dbg("Anti-Xray EFFECT error: " + e.getMessage());
         }
     }
 

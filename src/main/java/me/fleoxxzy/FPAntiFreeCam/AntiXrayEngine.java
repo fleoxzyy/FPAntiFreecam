@@ -67,9 +67,9 @@ public final class AntiXrayEngine {
 
     /**
      * Single block updates this close to the player's eye are always sent
-     * real. Covers a player placing an ore block or lighting redstone ore
-     * by hand (reach is ~5 blocks), so they never see their own block turn
-     * into stone while waiting for the next visibility check.
+     * real if they're a newly placed ore (reach is ~5 blocks), so a player
+     * never sees their own block turn into stone while waiting for the next
+     * visibility check.
      */
     private static final int CHANGE_REVEAL_RADIUS = 6;
 
@@ -565,14 +565,19 @@ public final class AntiXrayEngine {
      * or the position and type leak. Any thread.
      */
     public boolean isMasked(Player player, int x, int y, int z) {
+        return maskedFakeId(player, x, y, z) > 0;
+    }
+
+    /** NEW: the fake id this block is sent to the player as, 0 if it isn't masked. Any thread. */
+    public int maskedFakeId(Player player, int x, int y, int z) {
         PlayerXray px = players.get(player.getUniqueId());
-        if (px == null || px.chunks.isEmpty()) return false;
+        if (px == null || px.chunks.isEmpty()) return 0;
         long ck = columnKey(x >> 4, z >> 4);
         ChunkOres co = px.chunks.get(ck);
-        if (co == null) return false;
+        if (co == null) return 0;
         int li = localIndex(x, y, z, co.minY);
         int[] e = co.entry(li);
-        return e != null && e[0] >= 0 && e[1] > 0 && !px.isRevealed(ck, li);
+        return e != null && e[0] >= 0 && e[1] > 0 && !px.isRevealed(ck, li) ? e[1] : 0;
     }
 
     /** Client dropped this chunk (UNLOAD_CHUNK): forget its ores and reveals. */
@@ -775,7 +780,12 @@ public final class AntiXrayEngine {
             return id;
         }
 
-        if (px.isNearEye(x, y, z, Math.max(alwaysRevealRadius, CHANGE_REVEAL_RADIUS))) {
+        // BUGFIX: only a block that just became an ore here (placed by hand)
+        // is sent real for being close. The server also re-sends unchanged
+        // blocks when a client right-clicks or digs at them, with no sight
+        // check, so a hacked client could probe every ore within reach.
+        boolean newOre = e == null || e[0] < 0;
+        if (newOre && px.isNearEye(x, y, z, Math.max(alwaysRevealRadius, CHANGE_REVEAL_RADIUS))) {
             px.reveal(ck, li);
             px.chunks.computeIfAbsent(ck, k -> ChunkOres.empty(x >> 4, z >> 4, meta.minY))
                     .put(li, id, prevFake, true);
