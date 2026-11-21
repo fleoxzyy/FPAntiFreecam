@@ -636,6 +636,8 @@ public final class AntiXrayEngine {
         int n = 0;
         int[] local = new int[64], real = new int[64], fake = new int[64];
         byte[] exposed = new byte[64];
+        // PERF: chooseFake's scratch arrays, once per chunk instead of per ore.
+        int[] fakeIds = new int[26], fakeCounts = new int[26];
         long masked = 0;
 
         for (int si = 0; si < sections.length; si++) {
@@ -664,7 +666,7 @@ public final class AntiXrayEngine {
 
                         int li = ((y - meta.minY) << 8) | (lz << 4) | lx;
                         boolean isExposed = isExposed(sections, si, lx, ly, lz, occ);
-                        int fakeId = chooseFake(sections, si, lx, ly, lz, y, meta.env, kinds);
+                        int fakeId = chooseFake(sections, si, lx, ly, lz, y, meta.env, kinds, fakeIds, fakeCounts);
 
                         if (n == local.length) {
                             int cap = n * 2;
@@ -877,9 +879,9 @@ public final class AntiXrayEngine {
      * depends on the packet's own data, so the same chunk always gets the
      * same fake blocks (ties are broken by NATURAL_KEYS order, then id).
      */
-    private int chooseFake(BaseChunk[] sections, int si, int lx, int ly, int lz, int y, int env, byte[] kinds) {
-        int[] ids = new int[26];
-        int[] counts = new int[26];
+    private int chooseFake(BaseChunk[] sections, int si, int lx, int ly, int lz, int y, int env, byte[] kinds,
+                           int[] ids, int[] counts) {
+        // ids/counts are reused scratch: only slots below distinct are read, each written first.
         int distinct = 0;
 
         for (int pass = 0; pass < 2; pass++) {
