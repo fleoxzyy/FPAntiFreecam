@@ -466,9 +466,11 @@ public final class EntityHider implements Listener {
 
     /** One candidate entity of a check, sorted nearest first. */
     private static final class Cand {
-        final Entity e; final Tracked t; final Location l; final double d2;
+        final Entity e; final Tracked t; final double x, y, z, d2;
         boolean visible;
-        Cand(Entity e, Tracked t, Location l, double d2) { this.e = e; this.t = t; this.l = l; this.d2 = d2; }
+        Cand(Entity e, Tracked t, double x, double y, double z, double d2) {
+            this.e = e; this.t = t; this.x = x; this.y = y; this.z = z; this.d2 = d2;
+        }
     }
 
     /**
@@ -560,11 +562,12 @@ public final class EntityHider implements Listener {
                 // reaching up into the sky. Entities above it that we hid are
                 // shown again by showOutOfRange below.
                 int zoneTop = plugin.getVoidY(world.getName());
+                // PERF: one player location for both uses below.
+                Location pl = player.getLocation();
                 if (plugin.isSmartFillActiveFor(player)) {
                     // NEW (follow-terrain): inside nearby mountains the zone reaches higher.
-                    Location pl0 = player.getLocation();
                     zoneTop = Math.max(zoneTop, plugin.maxRevealTopNear(world,
-                            pl0.getBlockX(), pl0.getBlockZ(), (int) range));
+                            pl.getBlockX(), pl.getBlockZ(), (int) range));
                 }
                 double top = Math.min(maxY, zoneTop + 2.0);
                 // NEW (terrain protection): everything on the faked surface can be hidden.
@@ -573,7 +576,6 @@ public final class EntityHider implements Listener {
                     release(player, v);
                     return;
                 }
-                Location pl = player.getLocation();
                 nearby = world.getNearbyEntities(new BoundingBox(
                         pl.getX() - range, minY, pl.getZ() - range,
                         pl.getX() + range, top, pl.getZ() + range));
@@ -585,6 +587,8 @@ public final class EntityHider implements Listener {
 
         Entity ownRoot = root(player);
         List<Cand> cands = new ArrayList<>(nearby.size());
+        // PERF: one Location filled per entity instead of a new one each (local: Folia runs checks in parallel).
+        Location l = new Location(world, 0, 0, 0);
         for (Entity e : nearby) {
             if (e == player) continue;
             // IMPROVEMENT: players that can't be hidden and aren't hidden now
@@ -594,7 +598,7 @@ public final class EntityHider implements Listener {
                 Tracked pt = v.tracked.get(e.getEntityId());
                 if (pt == null || pt.mode == SHOWN) continue;
             }
-            Location l = e.getLocation();
+            e.getLocation(l);
             double dx = l.getX() - v.ex, dy = l.getY() - v.ey, dz = l.getZ() - v.ez;
             // Tracking is horizontal distance only (Paper ChunkMap).
             double tr = tracking[trackingGroup(e)] + 8.0;
@@ -614,7 +618,7 @@ public final class EntityHider implements Listener {
             }
             t.checkedAt = now;
             if (t.ref == null || t.ref.get() != e) t.ref = new java.lang.ref.WeakReference<>(e);
-            cands.add(new Cand(e, t, l, dx * dx + dy * dy + dz * dz));
+            cands.add(new Cand(e, t, l.getX(), l.getY(), l.getZ(), dx * dx + dy * dy + dz * dz));
         }
         // Order only matters for the ray budget.
         if (los) cands.sort((a, b) -> Double.compare(a.d2, b.d2));
@@ -628,24 +632,23 @@ public final class EntityHider implements Listener {
         for (Cand c : cands) {
             Entity e = c.e;
             Tracked t = c.t;
-            Location l = c.l;
             boolean hideable = !(e instanceof Player) || v.hidePlayers;
             boolean always, zoneHidden;
             if (!hideable && v.terrainHide) {
                 // NEW (terrain protection): players are only hidden on the faked
                 // surface, not in the rest of the zone (include-players is off).
-                zoneHidden = terrainHidden(player, l) && !alwaysShow(player, v, t, e, ownRoot, now);
+                zoneHidden = terrainHidden(player, v, c.x, c.y, c.z) && !alwaysShow(player, v, t, e, ownRoot, now);
                 always = !zoneHidden;
             } else if (los) {
                 // IMPROVEMENT: players that can't be hidden (include-players off,
                 // locator bar on) skip the always-show and hidden-zone checks.
                 always = !hideable || alwaysShow(player, v, t, e, ownRoot, now);
-                zoneHidden = !always && zone && zoneHidden(player, t, l, now);
+                zoneHidden = !always && zone && zoneHidden(player, t, c.x, c.y, c.z, now);
             } else {
                 // IMPROVEMENT: chunk mode only needs always-show for entities
                 // that are in the hidden zone, so the cheap cached zone check
                 // runs first.
-                zoneHidden = hideable && zone && zoneHidden(player, t, l, now);
+                zoneHidden = hideable && zone && zoneHidden(player, t, c.x, c.y, c.z, now);
                 always = !zoneHidden || alwaysShow(player, v, t, e, ownRoot, now);
                 if (always) zoneHidden = false;
             }
@@ -659,7 +662,7 @@ public final class EntityHider implements Listener {
             } else if (cut) {
                 visible = t.mode == SHOWN; // no budget left: keep the current state
             } else {
-                double mx = l.getX() - t.tx, my = l.getY() - t.ty, mz = l.getZ() - t.tz;
+                double mx = c.x - t.tx, my = c.y - t.ty, mz = c.z - t.tz;
                 boolean entityStill = mx * mx + my * my + mz * mz < SKIP_ENTITY_MOVE_SQ;
                 boolean still = t.tested && camsStill && entityStill && t.lastTest >= wallsOpenedAt;
                 if (!still) t.stillStreak = 0;
@@ -670,7 +673,7 @@ public final class EntityHider implements Listener {
                 if (still && now - t.lastTest < every) {
                     visible = t.lastVisible;
                 } else {
-                    updateVelocity(t, l, now);
+                    updateVelocity(t, c.x, c.y, c.z, now);
                     int before = budget[0];
                     int r = visibility(world, minY, maxY, folia, cams, leadBox(e, t), budget,
                             c.d2 > FAR_POINTS_DIST * FAR_POINTS_DIST);
@@ -809,18 +812,20 @@ public final class EntityHider implements Listener {
     /** Chunk mode: still in the hidden zone and nothing makes it always shown. */
     private boolean keepHidden(Player player, View v, Tracked t, Entity e, World world, Entity ownRoot, long now) {
         if (!e.getWorld().equals(world)) return false;
+        Location l = e.getLocation();
         if (t.isPlayer && !v.hidePlayers) {
             // NEW (terrain protection): see check().
-            return v.terrainHide && terrainHidden(player, e.getLocation()) && !alwaysShow(player, v, t, e, ownRoot, now);
+            return v.terrainHide && terrainHidden(player, v, l.getX(), l.getY(), l.getZ())
+                    && !alwaysShow(player, v, t, e, ownRoot, now);
         }
-        if (!zoneHidden(player, t, e.getLocation(), now)) return false;
+        if (!zoneHidden(player, t, l.getX(), l.getY(), l.getZ(), now)) return false;
         return !alwaysShow(player, v, t, e, ownRoot, now);
     }
 
     /** NEW (terrain protection): on the surface faked for this player. */
-    private boolean terrainHidden(Player player, Location l) {
-        return plugin.isTerrainHidden(player.getUniqueId(), player.getWorld().getUID(),
-                floor(l.getX()), floor(l.getY()), floor(l.getZ()));
+    private boolean terrainHidden(Player player, View v, double x, double y, double z) {
+        // PERF: the world id check() already read, not a world lookup per entity.
+        return plugin.isTerrainHidden(player.getUniqueId(), v.worldId, floor(x), floor(y), floor(z));
     }
 
     /**
@@ -859,8 +864,8 @@ public final class EntityHider implements Listener {
      * the same block (at most ZONE_CACHE_MS), instead of the full palette and
      * reveal lookup on every check.
      */
-    private boolean zoneHidden(Player player, Tracked t, Location l, long now) {
-        int bx = floor(l.getX()), by = floor(l.getY()), bz = floor(l.getZ());
+    private boolean zoneHidden(Player player, Tracked t, double x, double y, double z, long now) {
+        int bx = floor(x), by = floor(y), bz = floor(z);
         if (t.zoneAt != 0 && now - t.zoneAt < ZONE_CACHE_MS
                 && bx == t.zx && by == t.zy && bz == t.zz) return t.zoneHidden;
         boolean hidden = plugin.isEntityInHiddenZone(player, bx, by, bz);
@@ -956,15 +961,15 @@ public final class EntityHider implements Listener {
         return r;
     }
 
-    private static void updateVelocity(Tracked t, Location l, long now) {
+    private static void updateVelocity(Tracked t, double x, double y, double z, long now) {
         long dt = now - t.tAt;
         if (t.tAt != 0 && dt > 0 && dt <= 2000) {
             double s = 1000.0 / dt;
-            t.vx = (l.getX() - t.tx) * s; t.vy = (l.getY() - t.ty) * s; t.vz = (l.getZ() - t.tz) * s;
+            t.vx = (x - t.tx) * s; t.vy = (y - t.ty) * s; t.vz = (z - t.tz) * s;
         } else {
             t.vx = t.vy = t.vz = 0;
         }
-        t.tx = l.getX(); t.ty = l.getY(); t.tz = l.getZ();
+        t.tx = x; t.ty = y; t.tz = z;
         t.tAt = now;
     }
 
