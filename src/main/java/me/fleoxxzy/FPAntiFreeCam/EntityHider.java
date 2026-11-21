@@ -1293,6 +1293,9 @@ public final class EntityHider implements Listener {
     /** Every 60 s: drops expired timers and entries for entities that are gone. */
     public void periodicCleanup() {
         long now = System.currentTimeMillis();
+        // PERF: combat with NPC "players" (Citizens etc.) made Views that were
+        // never removed, as NPCs never quit. Only online players are checked.
+        views.keySet().removeIf(id -> Bukkit.getPlayer(id) == null);
         for (View v : views.values()) {
             v.shownAt.values().removeIf(at -> now - at > SHOWN_TTL_MS * 4);
             v.combat.values().removeIf(at -> now - at > COMBAT_MS);
