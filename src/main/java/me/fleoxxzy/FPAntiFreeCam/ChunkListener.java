@@ -672,7 +672,7 @@ public final class ChunkListener implements PacketListener {
         int ceilingY = Math.max(hardFloorY, plugin.getSmartFillCeilingY());
         // NEW (follow-terrain): columns under a hill or mountain mask up to
         // their natural cover, above ceiling-y. Worked out with the palette.
-        boolean followTerrain = plugin.isFollowTerrainWorld(player.getWorld());
+        boolean followTerrain = plugin.isFollowTerrainWorld(world);
         if (minY > ceilingY && !followTerrain) return;
 
         SmartFillEngine.ColumnPalette palette = null;
@@ -1297,9 +1297,11 @@ public final class ChunkListener implements PacketListener {
         try {
             if (!plugin.isSmartFillEnabledFor(player) || !plugin.isSmartFillActiveFor(player)) return;
             WrapperPlayServerUpdateLight wrapper = new WrapperPlayServerUpdateLight(event);
+            // PERF: world read once per packet.
+            World world = player.getWorld();
             // NEW (terrain protection): a torch or lava on the faked surface
             // must not light it up; same light as the chunk send.
-            int terrainFloor = plugin.terrainFloor(player.getUniqueId(), player.getWorld().getUID(),
+            int terrainFloor = plugin.terrainFloor(player.getUniqueId(), world.getUID(),
                     wrapper.getX(), wrapper.getZ());
             if (terrainFloor != Integer.MIN_VALUE && wrapper.getLightData() != null) {
                 TerrainProtection tp = plugin.getTerrainProtection();
@@ -1310,7 +1312,7 @@ public final class ChunkListener implements PacketListener {
                     Arrays.fill(ground, f.top);
                 }
                 // Not faked by us yet: only the block light can be cleared safely.
-                relightTerrain(wrapper.getLightData(), player.getWorld().getMinHeight(), terrainFloor,
+                relightTerrain(wrapper.getLightData(), world.getMinHeight(), terrainFloor,
                         ground != null ? ground : NO_GROUND, ground != null);
                 event.markForReEncode(true);
             }
@@ -1449,7 +1451,9 @@ public final class ChunkListener implements PacketListener {
             Vector3i pos = wrapper.getBlockPosition();
             if (pos == null) return;
 
-            String worldName = player.getWorld().getName();
+            // PERF: world read once per packet.
+            World world = player.getWorld();
+            String worldName = world.getName();
             int hardFloorY = plugin.getVoidY(worldName);
             boolean smartFillEnabled = plugin.isSmartFillEnabledFor(player);
 
@@ -1481,7 +1485,7 @@ public final class ChunkListener implements PacketListener {
             // another one, whatever caused it (WorldEdit, plugins, fluids).
             SmartFillReveal airReveal = plugin.getSmartFillReveal();
             if (airReveal != null && pos.getY() <= revealTop + 2 && wrapper.getBlockState().getType().isAir()) {
-                airReveal.onAirSent(player.getUniqueId(), player.getWorld().getUID(),
+                airReveal.onAirSent(player.getUniqueId(), world.getUID(),
                         pos.getX(), pos.getY(), pos.getZ());
             }
 
@@ -1491,7 +1495,7 @@ public final class ChunkListener implements PacketListener {
             int sampleCeiling = SmartFillEngine.chunkMaskTop(palette, ceilingY)
                     + (plugin.getSmartFillSampleRadius() + 1) * 16;
             if (pos.getY() > hardFloorY && (pos.getY() <= sampleCeiling
-                    || (plugin.isFollowTerrainWorld(player.getWorld())
+                    || (plugin.isFollowTerrainWorld(world)
                         && SmartFillEngine.coverMayChange(palette, lx, lz, pos.getY(), ceilingY)))) {
                 smartFill.invalidate(worldName, pos.getX() >> 4, pos.getZ() >> 4);
             }
@@ -1567,7 +1571,9 @@ public final class ChunkListener implements PacketListener {
             WrapperPlayServerMultiBlockChange.EncodedBlock[] blocks = wrapper.getBlocks();
             if (blocks == null) return;
 
-            String  worldName     = player.getWorld().getName();
+            // PERF: world read once per packet.
+            World   world         = player.getWorld();
+            String  worldName     = world.getName();
             int     hardFloorY    = plugin.getVoidY(worldName);
             int     replacementId = plugin.getReplacementBlockId();
             boolean smartFillEnabled = plugin.isSmartFillEnabledFor(player);
@@ -1607,10 +1613,9 @@ public final class ChunkListener implements PacketListener {
                 }
             }
             SmartFillReveal reveal = plugin.getSmartFillReveal();
-            org.bukkit.Location pLoc = player.getLocation();
-            int pBX = pLoc.getBlockX();
-            int pBY = pLoc.getBlockY();
-            int pBZ = pLoc.getBlockZ();
+            // PERF: the player's position is only read once an entry needs the reveal test.
+            org.bukkit.Location pLoc = null;
+            int pBX = 0, pBY = 0, pBZ = 0;
             UUID playerId = player.getUniqueId();
             // NEW (follow-terrain): per-column masking tops in this chunk.
             final int chunkTop = SmartFillEngine.chunkMaskTop(palette, ceilingY);
@@ -1618,13 +1623,13 @@ public final class ChunkListener implements PacketListener {
                     palette != null && palette.revealTop != null ? palette.maxReveal : ceilingY);
             boolean coverEdit = false;
             // NEW (1.5.4): hidden entries are dropped, not faked - see dropHiddenBlockChange.
-            int minSection = player.getWorld().getMinHeight() >> 4;
+            int minSection = world.getMinHeight() >> 4;
             List<WrapperPlayServerMultiBlockChange.EncodedBlock> kept = null;
 
             // NEW: same as BLOCK_CHANGE: air arriving from any cause re-runs
             // the fill. One air block per packet is enough.
             if (reveal != null) {
-                UUID worldId = player.getWorld().getUID();
+                UUID worldId = world.getUID();
                 for (WrapperPlayServerMultiBlockChange.EncodedBlock block : blocks) {
                     if (block == null || block.getY() > revealChunkTop + 2) continue;
                     int id = block.getBlockId();
@@ -1643,7 +1648,7 @@ public final class ChunkListener implements PacketListener {
                     coverEdit = true;
                 }
                 boolean keep = true;
-                if (block.getY() <= SmartFillEngine.maskTop(palette, block.getX() & 15, block.getZ() & 15, ceilingY)
+                boolean hide = block.getY() <= SmartFillEngine.maskTop(palette, block.getX() & 15, block.getZ() & 15, ceilingY)
                         // IMPROVEMENT: shallow surface structures (PvP arenas,
                         // crystal holes, player-built rooms) are exempted entirely -
                         // see the matching comment in handleChunkData.
@@ -1652,9 +1657,15 @@ public final class ChunkListener implements PacketListener {
                         // hide a position with no real solid roof above it (the hard
                         // floor ignores this, same as before).
                         && (block.getY() <= hardFloorY
-                            || !smartFill.isOpenToSky(palette, block.getX() & 15, block.getZ() & 15, block.getY()))
-                        && (reveal == null || !reveal.isAirRevealed(
-                            block.getX(), block.getY(), block.getZ(), playerId, pBX, pBY, pBZ))) {
+                            || !smartFill.isOpenToSky(palette, block.getX() & 15, block.getZ() & 15, block.getY()));
+                if (hide && reveal != null) {
+                    if (pLoc == null) {
+                        pLoc = player.getLocation();
+                        pBX = pLoc.getBlockX(); pBY = pLoc.getBlockY(); pBZ = pLoc.getBlockZ();
+                    }
+                    hide = !reveal.isAirRevealed(block.getX(), block.getY(), block.getZ(), playerId, pBX, pBY, pBZ);
+                }
+                if (hide) {
                     keep = false;
                 }
                 if (keep) {
@@ -1672,7 +1683,7 @@ public final class ChunkListener implements PacketListener {
 
             // Follow-terrain: a mountain roof dug out (or built) by this edit
             // changes the column's cover; rebuild on the next chunk send.
-            if (coverEdit && plugin.isFollowTerrainWorld(player.getWorld())) {
+            if (coverEdit && plugin.isFollowTerrainWorld(world)) {
                 for (WrapperPlayServerMultiBlockChange.EncodedBlock b : blocks) {
                     if (b != null) { smartFill.invalidate(worldName, b.getX() >> 4, b.getZ() >> 4); break; }
                 }
@@ -2053,23 +2064,28 @@ public final class ChunkListener implements PacketListener {
      * the player's own nearby entities, which is worse than the minor leak
      * of an un-positioned sound.
      */
-    private boolean shouldCancelForPosition(Player player, int y, Integer x, Integer z) {
+    private boolean shouldCancelForPosition(Player player, int y, int x, int z) {
+        // PERF: every caller has a position (no boxed null x/z any more), the
+        // world is read once, and one palette lookup serves both checks.
+        UUID playerId = player.getUniqueId();
+        World world = player.getWorld();
         // NEW (terrain protection): nothing on the faked surface is real.
-        if (x != null && z != null
-                && plugin.isTerrainHidden(player.getUniqueId(), player.getWorld().getUID(), x, y, z)) {
+        if (plugin.isTerrainProtected(playerId)
+                && plugin.isTerrainHidden(playerId, world.getUID(), x, y, z)) {
             return true;
         }
-        int hardFloorY = plugin.getVoidY(player.getWorld().getName());
+        String worldName = world.getName();
+        int hardFloorY = plugin.getVoidY(worldName);
         boolean smartFillEnabled = plugin.isSmartFillEnabledFor(player);
+        SmartFillEngine.ColumnPalette palette = null;
 
         // IMPROVEMENT: shallow surface structures (PvP arenas, crystal
         // holes, player-built rooms) are exempted entirely - see the
         // matching comment in handleChunkData. Only meaningful in smart-fill
         // mode with a known X/Z; legacy mode and un-positioned packets fall
         // through to the existing logic below unchanged.
-        if (smartFillEnabled && x != null && z != null) {
-            String worldName = player.getWorld().getName();
-            SmartFillEngine.ColumnPalette palette = smartFill.getCachedPalette(worldName, x >> 4, z >> 4);
+        if (smartFillEnabled) {
+            palette = smartFill.getCachedPalette(worldName, x >> 4, z >> 4);
             if (smartFill.isExemptSurfaceStructure(palette, x & 15, z & 15, y)) return false;
         }
 
@@ -2087,13 +2103,12 @@ public final class ChunkListener implements PacketListener {
             // since it never reaches this method while the player is
             // genuinely below the floor.
             if (!smartFillEnabled || !plugin.isSmartFillActiveFor(player)) return true;
-            if (x == null || z == null) return true; // no position to localize, err hidden
 
             SmartFillReveal hardFloorReveal = plugin.getSmartFillReveal();
             if (hardFloorReveal == null) return true;
 
             org.bukkit.Location hardFloorLoc = player.getLocation();
-            return !hardFloorReveal.isAirRevealed(x, y, z, player.getUniqueId(),
+            return !hardFloorReveal.isAirRevealed(x, y, z, playerId,
                     hardFloorLoc.getBlockX(), hardFloorLoc.getBlockY(), hardFloorLoc.getBlockZ());
         }
 
@@ -2103,18 +2118,14 @@ public final class ChunkListener implements PacketListener {
         int ceilingY = plugin.getSmartFillCeilingY();
         if (y > ceilingY) {
             // NEW (follow-terrain): above ceiling-y only inside covered columns.
-            if (x == null || z == null) return false;
-            SmartFillEngine.ColumnPalette p = smartFill.getCachedPalette(player.getWorld().getName(), x >> 4, z >> 4);
-            if (y > SmartFillEngine.maskTop(p, x & 15, z & 15, ceilingY)) return false;
+            if (y > SmartFillEngine.maskTop(palette, x & 15, z & 15, ceilingY)) return false;
         }
-
-        if (x == null || z == null) return false; // no position to localize, don't guess
 
         SmartFillReveal reveal = plugin.getSmartFillReveal();
         if (reveal == null) return true; // reveal system unavailable, err hidden
 
         org.bukkit.Location loc = player.getLocation();
-        return !reveal.isAirRevealed(x, y, z, player.getUniqueId(),
+        return !reveal.isAirRevealed(x, y, z, playerId,
                 loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
     }
 
@@ -2136,7 +2147,10 @@ public final class ChunkListener implements PacketListener {
 
     private boolean cancelIfHiddenHardFloor(PacketSendEvent event, Player player, int x, int y, int z, boolean band) {
         // NEW (terrain protection): sounds, particles and effects on the faked surface.
-        if (plugin.isTerrainHidden(player.getUniqueId(), player.getWorld().getUID(), x, y, z)) {
+        // PERF: the cheap per-player gate first, the world only when it passes.
+        UUID playerId = player.getUniqueId();
+        if (plugin.isTerrainProtected(playerId)
+                && plugin.isTerrainHidden(playerId, player.getWorld().getUID(), x, y, z)) {
             event.setCancelled(true);
             return true;
         }
@@ -2163,7 +2177,7 @@ public final class ChunkListener implements PacketListener {
         return new int[]{ (int) Math.floor(pos.getX()), (int) Math.floor(pos.getY()), (int) Math.floor(pos.getZ()) };
     }
 
-    private boolean cancelIfShouldHide(PacketSendEvent event, Player player, int y, Integer x, Integer z) {
+    private boolean cancelIfShouldHide(PacketSendEvent event, Player player, int y, int x, int z) {
         if (!shouldCancelForPosition(player, y, x, z)) return false;
         event.setCancelled(true);
         return true;
