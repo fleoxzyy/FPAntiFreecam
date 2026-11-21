@@ -603,7 +603,7 @@ public final class EntityHider implements Listener {
             double dx = l.getX() - v.ex, dy = l.getY() - v.ey, dz = l.getZ() - v.ez;
             // Tracking is horizontal distance only (Paper ChunkMap).
             double tr = tracking[trackingGroup(e)] + 8.0;
-            if (dx * dx + dz * dz > tr * tr && e.getPassengers().isEmpty() && e.getVehicle() == null) continue;
+            // PERF: isEmpty() is \
             if (folia && !PlatformUtil.isOwnedByCurrentRegion(e)) continue; // keep state, test later
             Tracked t = v.tracked.get(e.getEntityId());
             if (t == null || !t.uuid.equals(e.getUniqueId())) {
@@ -629,7 +629,7 @@ public final class EntityHider implements Listener {
         RayVisitor rv = new RayVisitor();
         boolean cut = false;
         long wallsOpenedAt = v.wallsOpenedAt;
-        Map<Integer, Boolean> stackVisible = new java.util.HashMap<>();
+        Map<Integer, Boolean> stackVisible = null; // PERF: only made when a stack needs it
         boolean anyHidden = false;
         for (Cand c : cands) {
             Entity e = c.e;
@@ -708,13 +708,16 @@ public final class EntityHider implements Listener {
             for (Cand c : cands) {
                 if (!c.visible) continue;
                 Entity r = root(c.e);
-                if (r != c.e || !c.e.getPassengers().isEmpty()) stackVisible.put(r.getEntityId(), Boolean.TRUE);
+                if (r != c.e || !c.e.isEmpty()) {
+                    if (stackVisible == null) stackVisible = new java.util.HashMap<>();
+                    stackVisible.put(r.getEntityId(), Boolean.TRUE);
+                }
             }
         }
 
         for (Cand c : cands) {
             boolean visible = c.visible;
-            if (!visible && !stackVisible.isEmpty()
+            if (!visible && stackVisible != null
                     && Boolean.TRUE.equals(stackVisible.get(root(c.e).getEntityId()))) {
                 visible = true;
             }
@@ -977,7 +980,7 @@ public final class EntityHider implements Listener {
 
     /** Bounding box grown toward where the entity will be in LEAD_SECONDS, so it shows before it rounds a corner. */
     private static BoundingBox leadBox(Entity e, Tracked t) {
-        BoundingBox box = e.getBoundingBox().clone();
+        BoundingBox box = e.getBoundingBox(); // PERF: already a fresh copy, no clone
         double lx = cap(t.vx * LEAD_SECONDS), ly = cap(t.vy * LEAD_SECONDS), lz = cap(t.vz * LEAD_SECONDS);
         if (lx != 0 || ly != 0 || lz != 0) box.expandDirectional(lx, ly, lz);
         return box;
@@ -1146,7 +1149,13 @@ public final class EntityHider implements Listener {
     private void release(Player player, View v) {
         if (v.tracked.isEmpty() && v.bukkitHidden.isEmpty()) return;
         long now = System.currentTimeMillis();
-        for (Tracked t : new ArrayList<>(v.tracked.values())) {
+        // PERF: this runs on every check while nothing is on, so the copy is
+        // only made when something is actually hidden.
+        boolean anyHidden = false;
+        for (Tracked t : v.tracked.values()) {
+            if (t.mode != SHOWN) { anyHidden = true; break; }
+        }
+        for (Tracked t : anyHidden ? new ArrayList<>(v.tracked.values()) : Collections.<Tracked>emptyList()) {
             if (t.mode == SHOWN) continue;
             Entity e = Bukkit.getEntity(t.uuid);
             if (e == null) { forget(v, t); continue; }
