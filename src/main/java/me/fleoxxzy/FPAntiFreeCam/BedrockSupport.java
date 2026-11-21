@@ -5,6 +5,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.server.PluginEnableEvent;
 import org.bukkit.plugin.Plugin;
 
@@ -32,6 +33,13 @@ public final class BedrockSupport implements Listener {
     private final Plugin plugin;
     /** Cache: known bedrock player UUIDs for this session. */
     private final Set<UUID> bedrockCache = ConcurrentHashMap.newKeySet();
+    /**
+     * PERF: players known to be Java. Only "is Bedrock" was cached, so every
+     * check for a Java player (several per chunk / block packet) did the
+     * Geyser and Floodgate reflection calls again. Decided at join (and again
+     * when Geyser/Floodgate hook in), when their session is already known.
+     */
+    private final Set<UUID> javaCache = ConcurrentHashMap.newKeySet();
 
     public BedrockSupport(Plugin plugin) {
         this.plugin = plugin;
@@ -53,9 +61,21 @@ public final class BedrockSupport implements Listener {
         }
     }
 
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onJoin(PlayerJoinEvent event) {
+        decide(event.getPlayer());
+    }
+
+    private void decide(Player player) {
+        UUID id = player.getUniqueId();
+        javaCache.remove(id);
+        if (!isBedrock(player)) javaCache.add(id);
+    }
+
     // ── Initialisation ────────────────────────────────────────────────────
 
     private void init() {
+        javaCache.clear();
         // Reset: these are static, so a /fpac reload that re-constructs this
         // class would otherwise keep stale "available" flags (and stale Method
         // handles pointing at an old plugin classloader) from the last load.
@@ -101,6 +121,7 @@ public final class BedrockSupport implements Listener {
                     + " If Geyser runs on a proxy (BungeeCord/Velocity), install Floodgate on this"
                     + " server too so Bedrock players can be recognised.");
         }
+        for (Player p : Bukkit.getOnlinePlayers()) decide(p);
     }
 
     private Plugin findPlugin(String... names) {
@@ -115,6 +136,7 @@ public final class BedrockSupport implements Listener {
 
     public boolean isBedrock(Player player) {
         if (player == null) return false;
+        if (javaCache.contains(player.getUniqueId())) return false;
         if (isBedrock(player.getUniqueId())) return true;
         // NEW: Floodgate's default name prefixes. Java names can't contain these.
         String name = player.getName();
@@ -187,6 +209,7 @@ public final class BedrockSupport implements Listener {
 
     public void cleanupPlayer(UUID id) {
         bedrockCache.remove(id);
+        javaCache.remove(id);
     }
 
     public boolean isEnabled() {
@@ -210,6 +233,10 @@ public final class BedrockSupport implements Listener {
     /** Periodic cleanup: remove UUIDs whose players are no longer online. */
     public void periodicCleanup() {
         bedrockCache.removeIf(id -> {
+            Player p = Bukkit.getPlayer(id);
+            return p == null || !p.isOnline();
+        });
+        javaCache.removeIf(id -> {
             Player p = Bukkit.getPlayer(id);
             return p == null || !p.isOnline();
         });
