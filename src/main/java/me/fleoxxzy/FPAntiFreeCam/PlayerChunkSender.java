@@ -1,6 +1,5 @@
 package me.fleoxxzy.FPAntiFreeCam;
 
-import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
@@ -73,7 +72,7 @@ final class PlayerChunkSender {
     void send(Player player, World world, int cx, int cz) {
         if (player == null || !player.isOnline()) return;
         if (PlatformUtil.isFolia()
-                && !PlatformUtil.isOwnedByCurrentRegion(new Location(world, cx << 4, 0, cz << 4))) {
+                && !PlatformUtil.isOwnedByCurrentRegion(world, cx, cz)) {
             return;
         }
 

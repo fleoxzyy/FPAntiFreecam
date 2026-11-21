@@ -300,7 +300,7 @@ public final class AntiXrayReveal implements Listener {
         if (ignore != null && ignore.contains(pack(x, y, z))) return true;
         try {
             if (!world.isChunkLoaded(x >> 4, z >> 4)) return true;
-            if (folia && !PlatformUtil.isOwnedByCurrentRegion(new Location(world, x, y, z))) return true;
+            if (folia && !PlatformUtil.isOwnedByCurrentRegion(world, x >> 4, z >> 4)) return true;
             return !SightRaycaster.blocksSight(world.getType(x, y, z));
         } catch (Exception e) {
             return true;

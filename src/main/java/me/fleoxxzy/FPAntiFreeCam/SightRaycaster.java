@@ -1,6 +1,5 @@
 package me.fleoxxzy.FPAntiFreeCam;
 
-import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 
@@ -108,7 +107,7 @@ public final class SightRaycaster {
             int cx = x >> 4, cz = z >> 4;
             if (cx != lastCx || cz != lastCz) {
                 // Never trigger a chunk load, and on Folia never read another region's blocks.
-                if (folia && !PlatformUtil.isOwnedByCurrentRegion(new Location(world, cx << 4, y, cz << 4))) {
+                if (folia && !PlatformUtil.isOwnedByCurrentRegion(world, cx, cz)) {
                     return UNREADABLE;
                 }
                 if (level != null) {

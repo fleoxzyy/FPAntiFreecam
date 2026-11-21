@@ -506,7 +506,7 @@ public final class SmartFillReveal implements Listener {
                 byte st = chunkState[ci];
                 if (st == 0) {
                     boolean ok = world.isChunkLoaded(x >> 4, z >> 4)
-                            && (!folia || PlatformUtil.isOwnedByCurrentRegion(new Location(world, x, y, z)));
+                            && (!folia || PlatformUtil.isOwnedByCurrentRegion(world, x >> 4, z >> 4));
                     if (ok && level != null) {
                         try {
                             chunks[ci] = FastBlockReader.chunk(level, x >> 4, z >> 4);

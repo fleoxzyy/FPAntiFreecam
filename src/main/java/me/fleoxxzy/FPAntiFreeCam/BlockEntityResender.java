@@ -1,6 +1,5 @@
 package me.fleoxxzy.FPAntiFreeCam;
 
-import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
 
@@ -75,7 +74,7 @@ final class BlockEntityResender {
     /** Must run on the thread that owns the block (skipped otherwise on Folia). */
     static void resend(Player player, World world, int x, int y, int z) {
         if (failed) return;
-        if (PlatformUtil.isFolia() && !PlatformUtil.isOwnedByCurrentRegion(new Location(world, x, y, z))) return;
+        if (PlatformUtil.isFolia() && !PlatformUtil.isOwnedByCurrentRegion(world, x >> 4, z >> 4)) return;
         Object level = FastBlockReader.level(world);
         if (level == null || !init(level, player)) return;
         try {

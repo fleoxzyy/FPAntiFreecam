@@ -2,10 +2,14 @@ package me.fleoxxzy.FPAntiFreeCam;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.World;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Method;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
@@ -35,6 +39,11 @@ public final class PlatformUtil {
 
     private static Method isOwnedByCurrentRegionMethod;
     private static Method isOwnedByCurrentRegionEntityMethod;
+    // PERF: direct handles for the ownership checks, which run per entity and
+    // per chunk a ray crosses on Folia. Null: the Method above is used.
+    private static MethodHandle ownedLocationHandle;
+    private static MethodHandle ownedEntityHandle;
+    private static MethodHandle ownedChunkHandle;
 
     private static Method entityGetScheduler;
     private static Method entitySchedulerRun;
@@ -92,6 +101,17 @@ public final class PlatformUtil {
         } catch (Throwable ignored) {}
         try {
             isOwnedByCurrentRegionEntityMethod = Bukkit.class.getMethod("isOwnedByCurrentRegion", org.bukkit.entity.Entity.class);
+        } catch (Throwable ignored) {}
+        MethodHandles.Lookup lookup = MethodHandles.publicLookup();
+        try {
+            if (isOwnedByCurrentRegionMethod != null) ownedLocationHandle = lookup.unreflect(isOwnedByCurrentRegionMethod);
+        } catch (Throwable ignored) {}
+        try {
+            if (isOwnedByCurrentRegionEntityMethod != null) ownedEntityHandle = lookup.unreflect(isOwnedByCurrentRegionEntityMethod);
+        } catch (Throwable ignored) {}
+        try {
+            ownedChunkHandle = lookup.findStatic(Bukkit.class, "isOwnedByCurrentRegion",
+                    MethodType.methodType(boolean.class, World.class, int.class, int.class));
         } catch (Throwable ignored) {}
 
         try {
@@ -403,11 +423,37 @@ public final class PlatformUtil {
      */
     public static boolean isOwnedByCurrentRegion(Location location) {
         if (isFolia() && isOwnedByCurrentRegionMethod != null) {
+            MethodHandle h = ownedLocationHandle;
+            if (h != null) {
+                try {
+                    return (boolean) h.invokeExact(location);
+                } catch (Throwable ignored) {
+                    return true;
+                }
+            }
             try {
                 return (Boolean) isOwnedByCurrentRegionMethod.invoke(null, location);
             } catch (Exception ignored) {}
         }
         return true;
+    }
+
+    /**
+     * PERF: same as {@link #isOwnedByCurrentRegion(Location)} for a block in
+     * chunk (chunkX, chunkZ), without a Location per call. Uses Folia's
+     * chunk overload when it exists, otherwise the Location one.
+     */
+    public static boolean isOwnedByCurrentRegion(World world, int chunkX, int chunkZ) {
+        if (!isFolia() || isOwnedByCurrentRegionMethod == null) return true;
+        MethodHandle h = ownedChunkHandle;
+        if (h != null && world != null) {
+            try {
+                return (boolean) h.invokeExact(world, chunkX, chunkZ);
+            } catch (Throwable ignored) {
+                return true;
+            }
+        }
+        return isOwnedByCurrentRegion(new Location(world, chunkX << 4, 0, chunkZ << 4));
     }
 
     /**
@@ -417,6 +463,14 @@ public final class PlatformUtil {
      */
     public static boolean isOwnedByCurrentRegion(org.bukkit.entity.Entity entity) {
         if (isFolia() && isOwnedByCurrentRegionEntityMethod != null) {
+            MethodHandle h = ownedEntityHandle;
+            if (h != null) {
+                try {
+                    return (boolean) h.invokeExact(entity);
+                } catch (Throwable e) {
+                    return false;
+                }
+            }
             try {
                 return (Boolean) isOwnedByCurrentRegionEntityMethod.invoke(null, entity);
             } catch (Exception e) {
