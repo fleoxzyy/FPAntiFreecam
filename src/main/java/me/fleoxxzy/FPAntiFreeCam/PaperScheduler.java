@@ -27,7 +27,7 @@ public final class PaperScheduler {
     private final Map<UUID, Long>     lastRefreshTime = new ConcurrentHashMap<>();
     private final Queue<ChunkTask>    queue           = new ConcurrentLinkedQueue<>();
     /** Chunks already waiting in the queue, so overlapping refresh requests don't re-send the same chunk. */
-    private final Set<String>         pending         = ConcurrentHashMap.newKeySet();
+    private final Set<TaskKey>        pending         = ConcurrentHashMap.newKeySet();
     private       BukkitTask          drainTask;
 
     public PaperScheduler(Plugin plugin) {
@@ -149,11 +149,39 @@ public final class PaperScheduler {
         final UUID  playerId;
         /** Ring distance from player – used for priority ordering. */
         final int   ring;
-        final String key;
+        final TaskKey key;
         ChunkTask(World world, int cx, int cz, UUID playerId, int ring) {
             this.world = world; this.cx = cx; this.cz = cz;
             this.playerId = playerId; this.ring = ring;
-            this.key = playerId + ":" + world.getUID() + ":" + cx + ":" + cz;
+            this.key = new TaskKey(playerId, world.getUID(), cx, cz);
+        }
+    }
+
+    /**
+     * PERF: the pending-set key (player, world, chunk). It was a String built
+     * from all four for every queued chunk; equal exactly when that String was.
+     */
+    private static final class TaskKey {
+        final UUID playerId, worldId;
+        final int  cx, cz;
+        TaskKey(UUID playerId, UUID worldId, int cx, int cz) {
+            this.playerId = playerId; this.worldId = worldId; this.cx = cx; this.cz = cz;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof TaskKey)) return false;
+            TaskKey k = (TaskKey) o;
+            return cx == k.cx && cz == k.cz && playerId.equals(k.playerId) && worldId.equals(k.worldId);
+        }
+
+        @Override
+        public int hashCode() {
+            int h = playerId.hashCode();
+            h = 31 * h + worldId.hashCode();
+            h = 31 * h + cx;
+            return 31 * h + cz;
         }
     }
 }
