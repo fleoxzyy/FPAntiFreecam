@@ -632,8 +632,9 @@ public final class ChunkListener implements PacketListener {
                     for (int lx = 0; lx < 16; lx++) {
                         for (int lz = 0; lz < 16; lz++) {
                             try {
-                                WrappedBlockState current = section.get(lx, ly, lz);
-                                if (current != null && current.getGlobalId() != replacementId) {
+                                // PERF: the raw id instead of section.get, which copies the state for every block.
+                                int id = section.getBlockId(lx, ly, lz);
+                                if (id != replacementId && (replacementId != 0 || knownId(id) != 0)) {
                                     section.set(lx, ly, lz, replacement);
                                     replacedCount++;
                                     modified = true;
