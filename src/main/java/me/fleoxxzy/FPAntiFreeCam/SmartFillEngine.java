@@ -979,16 +979,16 @@ public final class SmartFillEngine {
 
                 int roofY = minY - 1;
                 for (int y = worldTopY; y >= minY; y--) {
-                    StateType t = blockTypeAt(sections, minY, lx, y, lz);
-                    if (!isNonRoofType(t)) { roofY = y; break; }
+                    if (isNonRoofAt(sections, minY, lx, y, lz)) continue;
+                    roofY = y;
+                    break;
                 }
                 topSolidY[colIdx] = roofY;
 
                 if (roofY != minY - 1 && roofY >= surfaceStructureMinY) {
                     int depthScanned = 0;
                     for (int y2 = roofY - 1; y2 >= minY && depthScanned < maxShallowPocketHeight; y2--, depthScanned++) {
-                        StateType t2 = blockTypeAt(sections, minY, lx, y2, lz);
-                        if (!isNonRoofType(t2)) {
+                        if (!isNonRoofAt(sections, minY, lx, y2, lz)) {
                             shallowPocketFloorY[colIdx] = y2; // found a floor within the shallow limit
                             break;
                         }
@@ -1461,22 +1461,35 @@ public final class SmartFillEngine {
     }
 
     /**
-     * Fetches the block type at a world Y within a chunk column, mapping it
-     * to the right section index/local Y. Returns null (reads as air/open)
-     * for an out-of-range Y, a missing/empty section, or any read failure -
-     * callers treat null the same as air via isNonRoofType.
+     * PERF: isNonRoofType for the block at a world Y within a chunk column,
+     * from the raw block id with the answer kept per id. It used to copy the
+     * block state and build its registry key for every block scanned.
+     * Out-of-range Y, a missing/empty section or a read failure count as
+     * non-roof (air/open), as before.
      */
-    private static StateType blockTypeAt(BaseChunk[] sections, int minY, int lx, int worldY, int lz) {
+    private static boolean isNonRoofAt(BaseChunk[] sections, int minY, int lx, int worldY, int lz) {
         int si = (worldY - minY) >> 4;
-        if (si < 0 || si >= sections.length) return null;
+        if (si < 0 || si >= sections.length) return true;
         BaseChunk section = sections[si];
-        if (section == null || section.isEmpty()) return null;
-        int ly = (worldY - minY) & 15;
+        if (section == null || section.isEmpty()) return true;
         try {
-            WrappedBlockState st = section.get(lx, ly, lz);
-            return st != null ? st.getType() : null;
+            int id = section.getBlockId(lx, (worldY - minY) & 15, lz);
+            if (id < 0 || id >= NON_ROOF_BY_ID.length) return nonRoofForId(id);
+            byte b = NON_ROOF_BY_ID[id];
+            if (b == 0) {
+                b = nonRoofForId(id) ? (byte) 1 : (byte) 2;
+                NON_ROOF_BY_ID[id] = b;
+            }
+            return b == 1;
         } catch (Exception e) {
-            return null;
+            return true;
         }
+    }
+
+    private static final byte[] NON_ROOF_BY_ID = new byte[1 << 16]; // 0 unknown, 1 non-roof, 2 roof
+
+    private static boolean nonRoofForId(int id) {
+        WrappedBlockState st = WrappedBlockState.getByGlobalId(id, false);
+        return isNonRoofType(st != null ? st.getType() : null);
     }
 }
